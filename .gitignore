@@ -1,0 +1,20 @@
+# Cấu hình cá nhân (chứa API key) — không commit
+config.toml
+
+# Thư mục dữ liệu / model — tự tạo khi chạy setup.py hoặc run.py,
+# không cần (và không nên) commit lên GitHub
+input/
+output/
+checkpoints/
+model_cache/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+
+# OS
+.DS_Store
+Thumbs.db
