@@ -1,0 +1,61 @@
+# =============================================================================
+# config.toml — cấu hình trung tâm cho AI Director Video Commentary (bản Colab)
+# Không còn dùng .env / os.getenv. Mọi module đọc cấu hình từ file này.
+# =============================================================================
+
+[api]
+# API key và endpoint cho LLM viết kịch bản (thay thế Claude built-in).
+# Model: Gemma 4 31B chạy trên Cerebras Cloud (OpenAI-compatible endpoint).
+cerebras_api_key = "csk-vdmwee9e6kpmpyxdcfkvrxrcyhekh5w6vk39nwfc9wxmpkhk"
+cerebras_base_url = "https://api.cerebras.ai/v1"
+cerebras_model = "zai-glm-4.7"
+cerebras_max_tokens = 8000
+cerebras_temperature = 0.8
+
+# Hugging Face token — chỉ cần nếu Qwen3-VL-4B-Instruct hoặc model cần auth.
+hf_token = "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"
+
+[tts]
+# edge-tts: không cần API key, chỉ cần chọn giọng.
+engine = "edge-tts"
+# Giọng mặc định. Ví dụ khác: "en-US-JennyNeural", "vi-VN-NamMinhNeural"
+voice = "vi-VN-HoaiMyNeural"
+rate = "+0%"
+volume = "+0%"
+pitch = "+0Hz"
+
+[processing]
+# ---- ASR (faster-whisper) ----
+asr_model_size = "small"          # tiny/base/small/medium/large-v3
+asr_device = "auto"               # auto | cuda | cpu
+asr_compute_type = "auto"         # auto | float16 | int8
+asr_language = "vi"               # mã ngôn ngữ ASR, để trống "" để auto-detect
+
+# ---- Vision (Qwen3-VL-4B-Instruct qua transformers) ----
+vision_model_name = "Qwen/Qwen3-VL-4B-Instruct"
+vision_device = "auto"            # auto | cuda | cpu
+vision_dtype = "float16"          # float16 | bfloat16 | float32
+vision_max_new_tokens = 512
+# Số khung hình đại diện lấy ra cho mỗi scene khi phân tích thị giác.
+vision_frames_per_scene = 3
+
+# ---- Scene detection ----
+scene_threshold = 27.0            # ngưỡng PySceneDetect (ContentDetector)
+min_scene_len_sec = 1.0
+
+# ---- Narration / storyboard ----
+narration_pov = "third_person"    # third_person | first_person
+content_type = "movie"            # movie | tv_drama | anime | short_drama | foreign_language_commentary
+genre = "drama"
+target_duration_sec = 800
+chars_per_sec = 4.0                # tốc độ đọc ước tính CHO VĂN BẢN CHỮ HÁN (số ký tự/giây)
+words_per_sec = 2.5                 # tốc độ đọc ước tính CHO TIẾNG VIỆT/TIẾNG ANH (số từ/giây)
+buffer_after_speech = 0.1
+min_clip_duration = 1.0
+max_speed_ratio = 4.0              # source_duration / output_duration tối đa cho phép
+
+[paths]
+input_video = "./input/source.mp4"
+output_dir = "./output"
+checkpoint_dir = "./checkpoints"
+model_cache_dir = "./model_cache"

@@ -49,6 +49,18 @@ class Config:
         """Trả về toàn bộ một section (vd: cfg.section('processing'))."""
         return self._data.get(name, {})
 
+    def set(self, dotted_key: str, value: Any) -> None:
+        """
+        Ghi đè một giá trị trong cấu hình đang chạy (chỉ trong bộ nhớ, không đụng tới
+        file config.toml trên đĩa). Dùng khi cần cập nhật giá trị runtime, vd sau khi
+        hỏi lại người dùng đường dẫn video đầu vào.
+        """
+        parts = dotted_key.split(".")
+        node = self._data
+        for part in parts[:-1]:
+            node = node.setdefault(part, {})
+        node[parts[-1]] = value
+
     def resolve_path(self, dotted_key: str, default: str | None = None) -> Path:
         """
         Đọc một giá trị đường dẫn từ config và chuẩn hoá thành Path tuyệt đối,

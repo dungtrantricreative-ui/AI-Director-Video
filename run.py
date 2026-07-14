@@ -17,6 +17,7 @@ package con `modules/`, nên không cần chỉnh sys.path để import lẫn nh
 
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -62,6 +63,86 @@ def ensure_python_packages() -> None:
         print("[deps] Đã cài xong package còn thiếu.")
     else:
         print("[deps] Mọi package quan trọng đã sẵn sàng.")
+
+
+def _update_config_input_video(cfg, video_path: Path) -> None:
+    """
+    Ghi đường dẫn video mới vào config.toml (key `paths.input_video`) để lần chạy
+    sau không phải hỏi lại. Chỉ thay thế đúng dòng `input_video = "..."` bằng regex
+    (không cần thư viện ghi TOML riêng, vì định dạng dòng này luôn cố định).
+    Nếu không ghi được file (vd không có quyền), vẫn tiếp tục chạy — chỉ là lần
+    sau sẽ phải hỏi lại.
+    """
+    cfg.set("paths.input_video", str(video_path))
+
+    config_path = cfg.config_path
+    try:
+        text = config_path.read_text(encoding="utf-8")
+        new_value = str(video_path).replace("\\", "/")  # tránh lỗi escape chuỗi TOML trên Windows
+        pattern = re.compile(r'^(\s*input_video\s*=\s*)"[^"]*"', re.MULTILINE)
+        if pattern.search(text):
+            text = pattern.sub(lambda m: f'{m.group(1)}"{new_value}"', text, count=1)
+        else:
+            # Không tìm thấy dòng input_video (config bất thường) -> thêm vào cuối file.
+            text = text.rstrip("\n") + f'\ninput_video = "{new_value}"\n'
+        config_path.write_text(text, encoding="utf-8")
+        print(f"[input] Đã lưu đường dẫn video vào {config_path.name}, lần chạy sau sẽ không cần hỏi lại.")
+    except OSError as e:
+        print(f"[input] CẢNH BÁO: không ghi được {config_path.name} ({e}). "
+              f"Đường dẫn chỉ dùng cho lần chạy này, lần sau sẽ phải nhập lại.")
+
+
+def ask_video_path(cfg) -> Path:
+    """
+    Đảm bảo có một đường dẫn video đầu vào hợp lệ trước khi chạy preprocess.
+
+    - Nếu `paths.input_video` trong config.toml đã trỏ đúng tới 1 file tồn tại -> dùng
+      luôn, không hỏi gì cả.
+    - Nếu chưa từng được set, bị để trống, trỏ sai, hoặc file đã bị xoá/di chuyển ->
+      in rõ lý do rồi hỏi người dùng nhập đường dẫn (lặp lại tới khi hợp lệ).
+    - Sau khi có đường dẫn hợp lệ, tự ghi đè lại vào config.toml.
+    - Nếu đang chạy non-interactive (không có TTY, vd cron/CI) mà không có đường dẫn
+      hợp lệ sẵn, báo lỗi rõ ràng thay vì treo ở input().
+    """
+    configured = cfg.get("paths.input_video")
+    candidate: Path | None = None
+    if configured:
+        try:
+            candidate = cfg.resolve_path("paths.input_video")
+        except KeyError:
+            candidate = None
+        if candidate is not None and candidate.exists() and candidate.is_file():
+            return candidate
+        print("[input] Đường dẫn video trong config.toml không hợp lệ hoặc file không tồn tại:")
+        print(f"        {candidate if candidate is not None else configured}")
+    else:
+        print("[input] Chưa có đường dẫn video đầu vào nào được cấu hình trong config.toml.")
+
+    if not sys.stdin.isatty():
+        raise FileNotFoundError(
+            "Không tìm thấy video đầu vào hợp lệ và đang chạy non-interactive (không có TTY) "
+            "nên không thể hỏi đường dẫn. Hãy sửa `paths.input_video` trong config.toml rồi chạy lại."
+        )
+
+    print("Nhập đường dẫn tới file video đầu vào (có thể kéo-thả file vào cửa sổ dòng lệnh).")
+    while True:
+        raw = input("Đường dẫn video: ").strip().strip('"').strip("'")
+        if not raw:
+            print("  -> Đường dẫn trống, thử lại.")
+            continue
+        candidate = Path(raw).expanduser()
+        if not candidate.is_absolute():
+            candidate = (Path.cwd() / candidate).resolve()
+        if not candidate.exists():
+            print(f"  -> Không tìm thấy file: {candidate}. Thử lại.")
+            continue
+        if not candidate.is_file():
+            print(f"  -> Đường dẫn không phải là file: {candidate}. Thử lại.")
+            continue
+        break
+
+    _update_config_input_video(cfg, candidate)
+    return candidate
 
 
 def ask_task_config(cfg) -> dict:
@@ -148,6 +229,12 @@ def main() -> None:
 
     stages = ["preprocess", "asr", "vision", "semantic_graph", "script", "tts", "render"]
     tracker = StepTracker(stages)
+
+    # ---- Đảm bảo có đường dẫn video hợp lệ trước khi preprocess cần đến nó ----
+    # (chỉ hỏi nếu preprocess thực sự sẽ chạy; nếu đã có checkpoint thì bỏ qua, không hỏi làm gì)
+    if not ckpt.is_done("preprocess"):
+        video_path = ask_video_path(cfg)
+        print(f"[input] Dùng video: {video_path}")
 
     # ---- Stage: preprocess ----
     tracker.start("preprocess")

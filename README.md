@@ -104,7 +104,35 @@ pip install -r requirements.txt
 
 # 3. Tạo config.toml từ mẫu và điền Cerebras API key
 cp config.toml.example config.toml    # Windows (PowerShell): copy config.toml.example config.toml
+
+# 4. (Tuỳ chọn) Tải trước model — nếu bỏ qua, model sẽ tự tải khi chạy run.py lần đầu
+python3 -c "
+from pathlib import Path
+cache_dir = Path('./model_cache').resolve()
+cache_dir.mkdir(parents=True, exist_ok=True)
+
+from faster_whisper import WhisperModel
+WhisperModel('small', device='cpu', compute_type='int8', download_root=str(cache_dir))
+
+from transformers import AutoProcessor
+AutoProcessor.from_pretrained('Qwen/Qwen3-VL-4B-Instruct', cache_dir=str(cache_dir), trust_remote_code=True)
+"
 ```
+
+> Nếu Hugging Face yêu cầu đăng nhập (model gated) hoặc bạn muốn tránh giới
+> hạn tốc độ tải, đặt token trước khi chạy lệnh trên:
+> ```bash
+> export HF_TOKEN=hf_xxxxxxxx          # Windows (PowerShell): $env:HF_TOKEN="hf_xxxxxxxx"
+> ```
+>
+> Lệnh trên chỉ tải **processor** của model vision (nhẹ); **trọng số**
+> Qwen3-VL-4B-Instruct (~8-10GB) sẽ tự tải về `model_cache/` ngay lần đầu
+> pipeline chạy tới bước `vision.py` — không cần tải thủ công thêm, chỉ cần
+> đảm bảo đủ dung lượng ổ đĩa và mạng ổn định ở lần chạy đầu tiên.
+>
+> Nếu đổi `processing.vision_model_name` trong `config.toml` sang model khác
+> (không phải `Qwen/Qwen3-VL-4B-Instruct`), sửa lại tên model trong lệnh
+> `AutoProcessor.from_pretrained(...)` ở trên cho khớp.
 
 ### Google Colab
 
