@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,52 @@ from scenedetect import open_video, SceneManager
 from scenedetect.detectors import ContentDetector
 
 from progress_utils import print_progress_bar, run_ffmpeg_with_progress, Heartbeat
+
+
+def _resolve_input_video(cfg) -> Path:
+    """
+    Trả về Path video đầu vào hợp lệ. Nếu đường dẫn trong config.toml
+    (paths.input_video) không tồn tại và đang chạy tương tác (có TTY), hỏi
+    người dùng nhập lại đường dẫn thay vì raise FileNotFoundError ngay —
+    lặp lại cho tới khi nhập đúng file tồn tại hoặc bỏ trống để huỷ.
+
+    Nếu chạy non-interactive (không có TTY, vd: chạy nền/CI), không thể hỏi
+    nên vẫn raise FileNotFoundError như cũ kèm hướng dẫn sửa config.toml.
+    """
+    video_path = cfg.resolve_path("paths.input_video")
+    if video_path.exists():
+        return video_path
+
+    interactive = sys.stdin.isatty()
+    if not interactive:
+        raise FileNotFoundError(
+            f"Không tìm thấy video đầu vào: {video_path}\n"
+            f"Đang chạy non-interactive nên không thể hỏi đường dẫn — hãy đặt "
+            f"đúng file vào đường dẫn trên, hoặc sửa paths.input_video trong "
+            f"config.toml rồi chạy lại."
+        )
+
+    print(f"[preprocess] Không tìm thấy video tại: {video_path}")
+    while True:
+        entered = input(
+            "Nhập đường dẫn video đầu vào (Enter để huỷ pipeline): "
+        ).strip()
+        if not entered:
+            raise FileNotFoundError(
+                "Đã huỷ: không có video đầu vào hợp lệ."
+            )
+        candidate = Path(entered).expanduser()
+        if not candidate.is_absolute():
+            candidate = (Path.cwd() / candidate).resolve()
+        if candidate.is_file():
+            cfg.set("paths.input_video", str(candidate))
+            print(f"[preprocess] Dùng video: {candidate}")
+            print(
+                f"[preprocess] Gợi ý: sửa paths.input_video = \"{candidate}\" "
+                f"trong config.toml để không phải nhập lại ở lần chạy sau."
+            )
+            return candidate
+        print(f"[preprocess] Không tìm thấy file: {candidate}. Thử lại.")
 
 
 def probe_video(video_path: Path) -> dict[str, Any]:
@@ -176,13 +223,10 @@ def run_preprocess(cfg, checkpoint_mgr=None) -> dict[str, Any]:
     Entry point cho stage 'preprocess'. Đọc mọi tham số từ cfg (Config).
     Trả về dict: {video_info, audio_path, scenes, keyframes_dir, keyframes}
     """
-    video_path = cfg.resolve_path("paths.input_video")
+    video_path = _resolve_input_video(cfg)
     output_dir = cfg.resolve_path("paths.output_dir")
     pipeline_dir = output_dir / "pipeline"
     pipeline_dir.mkdir(parents=True, exist_ok=True)
-
-    if not video_path.exists():
-        raise FileNotFoundError(f"Không tìm thấy video đầu vào: {video_path}")
 
     print(f"[preprocess] (1/4) Probing video: {video_path}")
     video_info = probe_video(video_path)

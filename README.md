@@ -152,6 +152,12 @@ Nếu muốn dùng tên/đường dẫn khác, sửa `paths.input_video` trong
 `config.toml` cho khớp — pipeline đọc đúng đường dẫn đó, không tự dò tìm
 file trong thư mục.
 
+> **Nếu lỡ quên bước này:** khi chạy `run.py` trong terminal/Colab cell
+> tương tác (có TTY), pipeline sẽ **hỏi lại đường dẫn video ngay tại chỗ**
+> thay vì dừng với lỗi — chỉ cần gõ đường dẫn đúng và Enter. Chỉ khi chạy
+> non-interactive (chạy nền, cron, CI — không có TTY để hỏi) thì mới báo
+> lỗi `FileNotFoundError` như cũ, vì lúc đó không có ai để trả lời prompt.
+
 ### Bước 5 — (Tuỳ chọn) Tải trước model vision "local"
 
 Chỉ cần nếu bạn dùng `vision_backend = "local"` (Qwen3-VL-4B-Instruct) và
@@ -217,6 +223,13 @@ uploaded = files.upload()   # chọn video từ máy, sau đó đổi tên/copy 
 ```bash
 !python run.py
 ```
+
+> **Lưu ý Colab:** `!python run.py` chạy như 1 tiến trình con tách biệt,
+> không có TTY nên sẽ **không** hỏi lại đường dẫn video nếu thiếu — báo lỗi
+> `FileNotFoundError` ngay (đúng ý khi chạy nền, không bị treo chờ nhập).
+> Nếu muốn được hỏi lại đường dẫn ngay trong cell khi quên đặt video, dùng
+> `%run run.py` (IPython magic, chạy chung tiến trình với notebook nên
+> `input()` hoạt động được) thay vì `!python run.py`.
 
 ### Kiểm tra nhanh trước khi chạy `run.py` (checklist)
 
