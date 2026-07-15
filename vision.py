@@ -1,7 +1,7 @@
 """
 vision.py — phân tích thị giác cho từng scene.
 
-Hỗ trợ 2 backend, chọn qua config.toml [processing] vision_backend:
+Hỗ trợ 3 backend, chọn qua config.toml [processing] vision_backend:
   - "local"    : Qwen3-VL-4B-Instruct tải từ Hugging Face, chạy qua `transformers`
                  (cần GPU tốt, chậm với video nhiều scene vì generate() tuần tự
                  từng scene một).
@@ -9,6 +9,13 @@ Hỗ trợ 2 backend, chọn qua config.toml [processing] vision_backend:
                  dùng chung cerebras_api_key đã có trong [api]. Nhanh hơn nhiều
                  cho video dài vì chạy trên wafer-scale chip, không tốn thời
                  gian tải/giữ model 4B trong VRAM Colab.
+  - "mistral"  : Model multimodal của Mistral (mặc định Mistral Large — API id
+                 "mistral-large-latest", model lớn nhất/vision tốt nhất hiện có
+                 của Mistral: 675B tổng/41B active MoE, vision encoder tích hợp
+                 sẵn) qua API chính thức Mistral (OpenAI-compatible), dùng
+                 mistral_api_key riêng trong [api]. Không dùng chung engine với
+                 script_writer.py (vẫn là Cerebras/GLM) — chỉ thay backend đọc
+                 ảnh cho stage vision. Phù hợp cho máy không GPU/RAM thấp.
 
 Output JSON giữ nguyên schema `vision_analysis.json` mô tả trong
 ref-asr-vision-pipeline.md để không phá vỡ các stage sau (semantic graph,
@@ -351,10 +358,119 @@ class CerebrasVisionAnalyzer:
         return parsed
 
 
+# =============================================================================
+# Backend "mistral" — Mistral Medium 3.5 (multimodal) qua API chính thức Mistral
+# =============================================================================
+#
+# Dùng riêng cho stage vision (đọc ảnh scene) — KHÔNG liên quan đến engine
+# Cerebras/GLM (zai-glm-4.7) mà script_writer.py đang dùng để viết kịch bản,
+# 2 việc này độc lập hoàn toàn với nhau trong config.toml.
+#
+# API Mistral tương thích OpenAI (base_url https://api.mistral.ai/v1, dùng
+# chung thư viện `openai` đã có trong requirements.txt), nhưng field ảnh khác
+# Cerebras/OpenAI một chút: Mistral nhận "image_url" là 1 CHUỖI (URL hoặc
+# data-URI base64) trực tiếp, không bọc thêm {"url": ...} như OpenAI.
+class MistralVisionAnalyzer:
+    """Gọi model multimodal của Mistral (mặc định Mistral Medium 3.5 — model
+    lớn nhất, chất lượng đọc ảnh tốt nhất trong dòng Mistral hiện tại) để
+    phân tích scene. Free tier của Mistral rộng rãi hơn Cerebras nhiều, nhưng
+    vẫn giữ throttle + retry-on-429 cho an toàn (RPM/TPM thực tế có thể đổi
+    theo tài khoản, không cứng ngưỡng cụ thể)."""
+
+    def __init__(self, cfg):
+        self.cfg = cfg
+        self.api_key = cfg.get("api.mistral_api_key", "")
+        self.base_url = cfg.get("api.mistral_base_url", "https://api.mistral.ai/v1")
+        self.model = cfg.get("processing.mistral_vision_model", "mistral-large-latest")
+        self.max_tokens = cfg.get("processing.vision_max_new_tokens", 512)
+        self.max_images = cfg.get("processing.mistral_vision_max_images", 8)
+        self.rpm = max(1, cfg.get("processing.mistral_vision_rpm", 15))
+        self._min_interval = 60.0 / self.rpm
+        self._last_call_ts = 0.0
+        self.client = None
+
+    def load(self) -> None:
+        from openai import OpenAI
+        if not self.api_key or self.api_key.startswith("PASTE_"):
+            raise ValueError(
+                "Chưa cấu hình api.mistral_api_key trong config.toml "
+                "(cần cho vision_backend = \"mistral\")."
+            )
+        print(f"[vision] Dùng Mistral API, model '{self.model}' "
+              f"(backend=mistral, {self.rpm} RPM, tối đa {self.max_images} ảnh/request).")
+        self.client = OpenAI(api_key=self.api_key, base_url=self.base_url)
+
+    def unload(self) -> None:
+        self.client = None
+
+    @staticmethod
+    def _encode_image(path: str) -> str:
+        with open(path, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode("utf-8")
+        ext = Path(path).suffix.lstrip(".").lower() or "jpeg"
+        mime = "jpeg" if ext == "jpg" else ext
+        return f"data:image/{mime};base64,{b64}"
+
+    def _throttle(self) -> None:
+        elapsed = time.monotonic() - self._last_call_ts
+        wait = self._min_interval - elapsed
+        if wait > 0:
+            time.sleep(wait)
+        self._last_call_ts = time.monotonic()
+
+    def analyze_scene(self, scene_id: str, frame_paths: list[str]) -> dict[str, Any]:
+        existing = [p for p in frame_paths if Path(p).exists()][: self.max_images]
+        if not existing:
+            return _empty_result(scene_id, reason="no_frames")
+
+        # Mistral: "image_url" là chuỗi data-URI trực tiếp (khác OpenAI/Cerebras
+        # vốn bọc trong {"url": ...}) — xem docs.mistral.ai/studio-api/conversations/vision
+        content = [
+            {"type": "image_url", "image_url": self._encode_image(p)}
+            for p in existing
+        ]
+        content.append({
+            "type": "text",
+            "text": "Analyze this scene and return the JSON object described in the system prompt.",
+        })
+
+        max_retries = 3
+        for attempt in range(1, max_retries + 1):
+            self._throttle()
+            try:
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[
+                        {"role": "system", "content": VISION_SYSTEM_PROMPT},
+                        {"role": "user", "content": content},
+                    ],
+                    max_tokens=self.max_tokens,
+                    temperature=0.2,
+                )
+                output_text = response.choices[0].message.content or ""
+                break
+            except Exception as e:
+                is_rate_limit = "429" in str(e) or "rate" in str(e).lower()
+                if is_rate_limit and attempt < max_retries:
+                    backoff = 60.0 * attempt
+                    print(f"[vision] {scene_id}: bị rate limit (lần {attempt}), "
+                          f"chờ {backoff:.0f}s rồi thử lại...")
+                    time.sleep(backoff)
+                    continue
+                print(f"[vision] Lỗi gọi Mistral cho {scene_id}: {e}")
+                return _empty_result(scene_id, reason="api_error")
+
+        parsed = _parse_json_response(output_text)
+        parsed["scene_id"] = scene_id
+        return parsed
+
+
 def _build_analyzer(cfg):
     backend = cfg.get("processing.vision_backend", "local")
     if backend == "cerebras":
         return CerebrasVisionAnalyzer(cfg)
+    if backend == "mistral":
+        return MistralVisionAnalyzer(cfg)
     return LocalVisionAnalyzer(cfg)
 
 

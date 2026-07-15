@@ -15,6 +15,11 @@ cerebras_temperature = 0.8
 # Hugging Face token — chỉ cần nếu Qwen3-VL-4B-Instruct hoặc model cần auth.
 hf_token = "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"
 
+# API key cho vision backend "mistral" — độc lập với Cerebras ở trên, chỉ
+# dùng cho stage đọc ảnh (vision.py), không đụng tới engine viết kịch bản.
+mistral_api_key = "WJkOtf6FxncjGsfLs2mujxew0ikNIDKX"
+mistral_base_url = "https://api.mistral.ai/v1"
+
 [tts]
 # edge-tts: không cần API key, chỉ cần chọn giọng.
 engine = "edge-tts"
@@ -41,10 +46,17 @@ asr_language = "vi"               # mã ngôn ngữ ASR, để trống "" để 
 #   Gemma 4 cũng được đánh giá là yếu hơn hẳn so với model vision chuyên dụng.
 #   Chỉ bật "cerebras" cho video ngắn (vài chục-vài trăm scene) hoặc khi không
 #   có GPU khả dụng.
-vision_backend = "local"
+vision_backend = "mistral"
 cerebras_vision_model = "gemma-4-31b"
 cerebras_vision_max_images = 2      # free tier: tối đa 2 ảnh/request (Developer tier: 5)
 cerebras_vision_rpm = 5             # đổi thành 300 nếu đã nâng lên Developer/Pay-as-you-go
+
+# "mistral" -> model multimodal lớn nhất của Mistral (Mistral Medium 3.5) qua API
+# chính thức Mistral, dùng riêng mistral_api_key ở trên. Không thay engine viết
+# kịch bản (vẫn Cerebras/zai-glm-4.7) — chỉ đổi backend đọc ảnh scene.
+mistral_vision_model = "mistral-large-latest"
+mistral_vision_max_images = 8       # gửi tối đa 8 ảnh/request (nhiều hơn vision_frames_per_scene bên dưới)
+mistral_vision_rpm = 15             # throttle nhẹ phòng hờ, có tự động retry nếu dính 429
 
 vision_model_name = "Qwen/Qwen3-VL-4B-Instruct"
 vision_device = "auto"            # auto | cuda | cpu
