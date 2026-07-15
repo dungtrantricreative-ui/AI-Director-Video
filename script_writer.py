@@ -33,7 +33,7 @@ def _get_client(cfg) -> OpenAI:
     if not api_key or api_key.startswith("PASTE_"):
         raise ValueError(
             "Chưa cấu hình api.cerebras_api_key trong config.toml. "
-            "Chạy setup.py hoặc điền key thủ công."
+            "Điền key vào config.toml (mục [api] cerebras_api_key) — xem README."
         )
     return OpenAI(api_key=api_key, base_url=base_url)
 

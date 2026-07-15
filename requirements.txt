@@ -4,7 +4,7 @@
 # --- Config ---
 tomli>=2.0.1; python_version < "3.11"
 
-# --- System info (tuỳ chọn, dùng để in RAM trong setup.py) ---
+# --- System info (tuỳ chọn, dùng bởi platform_utils.print_system_info) ---
 psutil>=5.9.0
 
 # --- ASR ---

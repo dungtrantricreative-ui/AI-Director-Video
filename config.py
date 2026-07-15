@@ -76,7 +76,7 @@ def load_config(path: str | os.PathLike = "config.toml") -> Config:
     if not config_path.exists():
         raise FileNotFoundError(
             f"Không tìm thấy file cấu hình: {config_path}\n"
-            f"Hãy copy config.toml.example (hoặc chạy setup.py) để tạo config.toml."
+            f"Hãy copy config.toml.example thành config.toml rồi điền key (xem README mục Cài đặt)."
         )
 
     with open(config_path, "rb") as f:
@@ -106,6 +106,6 @@ def get_config(path: str | os.PathLike = "config.toml") -> Config:
 
 
 def reset_config_cache() -> None:
-    """Dùng trong test/Colab khi cần load lại config sau khi setup.py ghi file mới."""
+    """Dùng trong test/Colab khi cần load lại config sau khi config.toml bị sửa thủ công."""
     global _default_config
     _default_config = None

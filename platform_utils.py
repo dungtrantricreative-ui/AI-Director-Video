@@ -1,6 +1,6 @@
 """
 platform_utils.py — các hàm tiện ích đa nền tảng (Linux / macOS / Windows),
-dùng chung bởi run.py và setup.py.
+dùng chung bởi run.py.
 
 Không còn giả định "luôn chạy trên Debian/Colab với apt-get" — mỗi hàm ở đây
 tự phát hiện hệ điều hành (platform.system()) và trình quản lý gói phù hợp,
