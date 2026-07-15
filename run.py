@@ -17,7 +17,7 @@ package con `modules/`, nên không cần chỉnh sys.path để import lẫn nh
 
 from __future__ import annotations
 
-import re
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -30,7 +30,7 @@ from platform_utils import ensure_ffmpeg  # noqa: E402
 from progress_utils import StepTracker, print_progress_bar  # noqa: E402
 
 
-def ensure_python_packages() -> None:
+def ensure_python_packages(cfg=None) -> None:
     """Kiểm tra nhanh các package quan trọng, tự pip install nếu thiếu."""
     checks = {
         "faster_whisper": "faster-whisper",
@@ -63,86 +63,6 @@ def ensure_python_packages() -> None:
         print("[deps] Đã cài xong package còn thiếu.")
     else:
         print("[deps] Mọi package quan trọng đã sẵn sàng.")
-
-
-def _update_config_input_video(cfg, video_path: Path) -> None:
-    """
-    Ghi đường dẫn video mới vào config.toml (key `paths.input_video`) để lần chạy
-    sau không phải hỏi lại. Chỉ thay thế đúng dòng `input_video = "..."` bằng regex
-    (không cần thư viện ghi TOML riêng, vì định dạng dòng này luôn cố định).
-    Nếu không ghi được file (vd không có quyền), vẫn tiếp tục chạy — chỉ là lần
-    sau sẽ phải hỏi lại.
-    """
-    cfg.set("paths.input_video", str(video_path))
-
-    config_path = cfg.config_path
-    try:
-        text = config_path.read_text(encoding="utf-8")
-        new_value = str(video_path).replace("\\", "/")  # tránh lỗi escape chuỗi TOML trên Windows
-        pattern = re.compile(r'^(\s*input_video\s*=\s*)"[^"]*"', re.MULTILINE)
-        if pattern.search(text):
-            text = pattern.sub(lambda m: f'{m.group(1)}"{new_value}"', text, count=1)
-        else:
-            # Không tìm thấy dòng input_video (config bất thường) -> thêm vào cuối file.
-            text = text.rstrip("\n") + f'\ninput_video = "{new_value}"\n'
-        config_path.write_text(text, encoding="utf-8")
-        print(f"[input] Đã lưu đường dẫn video vào {config_path.name}, lần chạy sau sẽ không cần hỏi lại.")
-    except OSError as e:
-        print(f"[input] CẢNH BÁO: không ghi được {config_path.name} ({e}). "
-              f"Đường dẫn chỉ dùng cho lần chạy này, lần sau sẽ phải nhập lại.")
-
-
-def ask_video_path(cfg) -> Path:
-    """
-    Đảm bảo có một đường dẫn video đầu vào hợp lệ trước khi chạy preprocess.
-
-    - Nếu `paths.input_video` trong config.toml đã trỏ đúng tới 1 file tồn tại -> dùng
-      luôn, không hỏi gì cả.
-    - Nếu chưa từng được set, bị để trống, trỏ sai, hoặc file đã bị xoá/di chuyển ->
-      in rõ lý do rồi hỏi người dùng nhập đường dẫn (lặp lại tới khi hợp lệ).
-    - Sau khi có đường dẫn hợp lệ, tự ghi đè lại vào config.toml.
-    - Nếu đang chạy non-interactive (không có TTY, vd cron/CI) mà không có đường dẫn
-      hợp lệ sẵn, báo lỗi rõ ràng thay vì treo ở input().
-    """
-    configured = cfg.get("paths.input_video")
-    candidate: Path | None = None
-    if configured:
-        try:
-            candidate = cfg.resolve_path("paths.input_video")
-        except KeyError:
-            candidate = None
-        if candidate is not None and candidate.exists() and candidate.is_file():
-            return candidate
-        print("[input] Đường dẫn video trong config.toml không hợp lệ hoặc file không tồn tại:")
-        print(f"        {candidate if candidate is not None else configured}")
-    else:
-        print("[input] Chưa có đường dẫn video đầu vào nào được cấu hình trong config.toml.")
-
-    if not sys.stdin.isatty():
-        raise FileNotFoundError(
-            "Không tìm thấy video đầu vào hợp lệ và đang chạy non-interactive (không có TTY) "
-            "nên không thể hỏi đường dẫn. Hãy sửa `paths.input_video` trong config.toml rồi chạy lại."
-        )
-
-    print("Nhập đường dẫn tới file video đầu vào (có thể kéo-thả file vào cửa sổ dòng lệnh).")
-    while True:
-        raw = input("Đường dẫn video: ").strip().strip('"').strip("'")
-        if not raw:
-            print("  -> Đường dẫn trống, thử lại.")
-            continue
-        candidate = Path(raw).expanduser()
-        if not candidate.is_absolute():
-            candidate = (Path.cwd() / candidate).resolve()
-        if not candidate.exists():
-            print(f"  -> Không tìm thấy file: {candidate}. Thử lại.")
-            continue
-        if not candidate.is_file():
-            print(f"  -> Đường dẫn không phải là file: {candidate}. Thử lại.")
-            continue
-        break
-
-    _update_config_input_video(cfg, candidate)
-    return candidate
 
 
 def ask_task_config(cfg) -> dict:
@@ -214,10 +134,21 @@ def main() -> None:
     print("=" * 70)
 
     ensure_ffmpeg()
-    ensure_python_packages()
 
     cfg = load_config("config.toml")
+    ensure_python_packages(cfg)
+
+    # Nạp hf_token từ config.toml vào biến môi trường TRƯỚC khi bất kỳ module nào
+    # (asr.py, vision.py) import huggingface_hub/transformers, để việc tải model
+    # dùng đúng token đã cấu hình thay vì luôn gửi request "unauthenticated".
+    hf_token = cfg.get("api.hf_token", "")
+    if hf_token and not hf_token.startswith("PASTE_"):
+        os.environ["HF_TOKEN"] = hf_token
+        os.environ["HUGGING_FACE_HUB_TOKEN"] = hf_token
+        print("[main] Đã nạp hf_token từ config.toml vào biến môi trường.")
+
     checkpoint_dir = cfg.resolve_path("paths.checkpoint_dir")
+
     ckpt = CheckpointManager(checkpoint_dir)
 
     print("\n[checkpoint] Trạng thái hiện tại:")
@@ -230,83 +161,43 @@ def main() -> None:
     stages = ["preprocess", "asr", "vision", "semantic_graph", "script", "tts", "render"]
     tracker = StepTracker(stages)
 
-    # ---- Đảm bảo có đường dẫn video hợp lệ trước khi preprocess cần đến nó ----
-    # (chỉ hỏi nếu preprocess thực sự sẽ chạy; nếu đã có checkpoint thì bỏ qua, không hỏi làm gì)
-    if not ckpt.is_done("preprocess"):
-        video_path = ask_video_path(cfg)
-        print(f"[input] Dùng video: {video_path}")
+    def run_stage(stage: str, compute_fn, has_checkpoint: bool = True):
+        """
+        Chạy 1 stage: bỏ qua nếu đã có checkpoint local, ngược lại chạy
+        compute_fn() rồi lưu.
+        """
+        tracker.start(stage)
+        if has_checkpoint and ckpt.is_done(stage):
+            result = ckpt.load(stage)
+            print(f"[main] Bỏ qua {stage} (đã có checkpoint).")
+            tracker.finish(stage, skipped=True)
+        else:
+            result = compute_fn()
+            tracker.finish(stage)
+        return result
 
-    # ---- Stage: preprocess ----
-    tracker.start("preprocess")
-    if ckpt.is_done("preprocess"):
-        preprocess_result = ckpt.load("preprocess")
-        print("[main] Bỏ qua preprocess (đã có checkpoint).")
-        tracker.finish("preprocess", skipped=True)
-    else:
-        preprocess_result = preprocess.run_preprocess(cfg, ckpt)
-        tracker.finish("preprocess")
+    preprocess_result = run_stage("preprocess", lambda: preprocess.run_preprocess(cfg, ckpt))
+    asr_timeline = run_stage("asr", lambda: asr.run_asr(cfg, preprocess_result, ckpt))
+    vision_analysis = run_stage("vision", lambda: vision.run_vision_analysis(cfg, preprocess_result, ckpt))
 
-    # ---- Stage: asr ----
-    tracker.start("asr")
-    if ckpt.is_done("asr"):
-        asr_timeline = ckpt.load("asr")
-        print("[main] Bỏ qua asr (đã có checkpoint).")
-        tracker.finish("asr", skipped=True)
-    else:
-        asr_timeline = asr.run_asr(cfg, preprocess_result, ckpt)
-        tracker.finish("asr")
-
-    # ---- Stage: vision ----
-    tracker.start("vision")
-    if ckpt.is_done("vision"):
-        vision_analysis = ckpt.load("vision")
-        print("[main] Bỏ qua vision (đã có checkpoint).")
-        tracker.finish("vision", skipped=True)
-    else:
-        vision_analysis = vision.run_vision_analysis(cfg, preprocess_result, ckpt)
-        tracker.finish("vision")
-
-    # ---- Semantic graph (không có checkpoint riêng, chạy nhanh + luôn cần dữ liệu mới nhất) ----
-    tracker.start("semantic_graph")
-    semantic_blocks = semantic_graph.run_semantic_graph(
-        cfg, preprocess_result, asr_timeline, vision_analysis, ckpt
+    # Semantic graph không có checkpoint riêng (chạy nhanh + luôn cần dữ liệu mới nhất).
+    semantic_blocks = run_stage(
+        "semantic_graph",
+        lambda: semantic_graph.run_semantic_graph(cfg, preprocess_result, asr_timeline, vision_analysis, ckpt),
+        has_checkpoint=False,
     )
-    tracker.finish("semantic_graph")
 
-    # ---- Stage: script (narration + storyboard) ----
-    tracker.start("script")
-    if ckpt.is_done("script"):
-        storyboard = ckpt.load("script")
-        print("[main] Bỏ qua script (đã có checkpoint).")
-        tracker.finish("script", skipped=True)
-    else:
+    def _run_script():
         task_config = ask_task_config(cfg)
         hook = choose_hook(cfg, task_config)
-        storyboard = script_writer.run_script_writer(
+        return script_writer.run_script_writer(
             cfg, task_config, semantic_blocks, asr_timeline, vision_analysis,
             hook=hook, director_brief=task_config.get("plot_summary", ""), checkpoint_mgr=ckpt,
         )
-        tracker.finish("script")
 
-    # ---- Stage: tts ----
-    tracker.start("tts")
-    if ckpt.is_done("tts"):
-        tts_result = ckpt.load("tts")
-        print("[main] Bỏ qua tts (đã có checkpoint).")
-        tracker.finish("tts", skipped=True)
-    else:
-        tts_result = tts.run_tts(cfg, storyboard, ckpt)
-        tracker.finish("tts")
-
-    # ---- Stage: render ----
-    tracker.start("render")
-    if ckpt.is_done("render"):
-        render_result = ckpt.load("render")
-        print("[main] Bỏ qua render (đã có checkpoint).")
-        tracker.finish("render", skipped=True)
-    else:
-        render_result = render.run_render(cfg, storyboard, tts_result, ckpt)
-        tracker.finish("render")
+    storyboard = run_stage("script", _run_script)
+    tts_result = run_stage("tts", lambda: tts.run_tts(cfg, storyboard, ckpt))
+    render_result = run_stage("render", lambda: render.run_render(cfg, storyboard, tts_result, ckpt))
 
     print("\n" + "=" * 70)
     print("HOÀN TẤT / DONE")
