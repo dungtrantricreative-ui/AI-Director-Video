@@ -26,11 +26,16 @@ from typing import Any
 class CheckpointManager:
     """Enhanced checkpoint manager with micro-checkpoints and cloud sync."""
 
-    def __init__(self, checkpoint_dir: str | Path, project_id: str = "", filebase_storage=None):
+    def __init__(self, checkpoint_dir: str | Path, project_id: str = "", filebase_storage=None,
+                 auto_sync_cloud: bool = True):
         self.dir = Path(checkpoint_dir)
         self.dir.mkdir(parents=True, exist_ok=True)
         self.project_id = project_id
         self.filebase = filebase_storage
+        # auto_sync_cloud: đọc từ config processing.auto_sync_cloud. Nếu False,
+        # KHÔNG tự động sync checkpoint lên Filebase sau mỗi lần lưu (người
+        # dùng có thể vẫn chủ động sync tay qua menu "5. Đồng bộ lên cloud").
+        self.auto_sync_cloud = auto_sync_cloud
         self._save_count = 0
         # Đếm riêng số lần save_micro() được gọi, dùng để throttle sync lên
         # Filebase (KHÔNG dùng chung _save_count — biến đó chỉ tăng trong
@@ -229,7 +234,7 @@ class CheckpointManager:
 
     def _sync_to_cloud(self, local_path: Path, remote_relative: str) -> None:
         """Sync a single file to Filebase Storage."""
-        if self.filebase is None:
+        if self.filebase is None or not self.auto_sync_cloud:
             return
         try:
             remote_key = f"projects/{self.project_id}/{remote_relative}"
@@ -238,9 +243,14 @@ class CheckpointManager:
             # Don't crash pipeline on cloud sync failure
             pass
 
-    def sync_all_to_cloud(self) -> dict[str, int]:
-        """Sync all checkpoint files to Filebase Storage."""
+    def sync_all_to_cloud(self, force: bool = False) -> dict[str, int]:
+        """Sync all checkpoint files to Filebase Storage.
+
+        force=True bỏ qua cờ auto_sync_cloud (dùng khi người dùng chủ động
+        bấm "đồng bộ" từ menu, chứ không phải auto-sync ngầm)."""
         if self.filebase is None:
+            return {"uploaded": 0, "errors": 0}
+        if not self.auto_sync_cloud and not force:
             return {"uploaded": 0, "errors": 0}
 
         uploaded = 0

@@ -127,6 +127,28 @@ def choose_hook(cfg, task_config: dict) -> str | None:
         return hooks[0]["text"]
 
 
+def _list_projects_including_cloud(pm: ProjectManager, filebase: FilebaseStorage | None) -> list[dict]:
+    """Liệt kê project cục bộ + cloud, để không bỏ sót project chỉ còn trên
+    Filebase (vd: ổ đĩa cục bộ vừa bị xoá/mất do máy cloud khởi động lại)."""
+    return pm.list_all_projects(include_cloud=filebase is not None)
+
+
+def _resolve_selected_project(pm: ProjectManager, filebase, selected: dict) -> dict | None:
+    """Nếu project được chọn chỉ tồn tại trên cloud (source == 'cloud_only'),
+    tự động tải nó về trước khi thao tác tiếp. Trả về meta mới nhất, hoặc
+    None nếu tải thất bại."""
+    if selected.get("source") != "cloud_only":
+        return selected
+
+    project_id = selected["project_id"]
+    print(f"\n  [project] '{project_id}' chỉ có trên cloud — đang tự động tải về...")
+    ok = pm.sync_from_cloud(project_id)
+    if not ok:
+        print(f"  [project] Tải project '{project_id}' từ cloud thất bại.")
+        return None
+    return pm.get_project_status(project_id)
+
+
 def run_project_menu(cfg, filebase: FilebaseStorage | None) -> None:
     """Menu quản lý project chính."""
     projects_dir = cfg.resolve_path("paths.projects_dir")
@@ -155,13 +177,16 @@ def run_project_menu(cfg, filebase: FilebaseStorage | None) -> None:
                 print(f"  Lỗi: {e}")
 
         elif action == "2":
-            # Liệt kê và tiếp tục project
-            projects = pm.scan_local_projects()
+            # Liệt kê và tiếp tục project (bao gồm cả project chỉ có trên cloud)
+            projects = _list_projects_including_cloud(pm, filebase)
             if not projects:
-                print("\n  Không tìm thấy project cục bộ nào. Hãy tạo 1 project trước.")
+                print("\n  Không tìm thấy project nào (cả cục bộ lẫn cloud). Hãy tạo 1 project trước.")
                 continue
             selected = pm.prompt_select_project(projects)
             if selected:
+                selected = _resolve_selected_project(pm, filebase, selected)
+                if not selected:
+                    continue
                 print(f"\n  Đã chọn: {selected['project_id']}")
                 print(f"  Trạng thái: {selected.get('status', 'unknown')}")
                 run_pipeline_on_project(cfg, pm, selected["project_id"], filebase)
@@ -173,8 +198,8 @@ def run_project_menu(cfg, filebase: FilebaseStorage | None) -> None:
             pm.display_projects(projects)
 
         elif action == "4":
-            # Xoá project
-            projects = pm.scan_local_projects()
+            # Xoá project (bao gồm cả project chỉ có trên cloud)
+            projects = _list_projects_including_cloud(pm, filebase)
             if not projects:
                 print("\n  Không có project nào để xoá.")
                 continue
@@ -182,8 +207,15 @@ def run_project_menu(cfg, filebase: FilebaseStorage | None) -> None:
             if selected:
                 confirm = input(f"  Xoá '{selected['project_id']}'? (y/N): ").strip().lower()
                 if confirm == "y":
-                    cloud = input("  Xoá luôn trên cloud? (y/N): ").strip().lower() == "y"
-                    pm.delete_project(selected["project_id"], cloud=cloud)
+                    if selected.get("source") == "cloud_only":
+                        # Không có bản cục bộ để xoá, chỉ có thể xoá trên cloud.
+                        if filebase:
+                            filebase.delete_project(selected["project_id"])
+                        else:
+                            print("  Chưa cấu hình Filebase, không thể xoá.")
+                    else:
+                        cloud = input("  Xoá luôn trên cloud? (y/N): ").strip().lower() == "y"
+                        pm.delete_project(selected["project_id"], cloud=cloud)
 
         elif action == "5":
             # Đồng bộ lên cloud
@@ -218,13 +250,16 @@ def run_project_menu(cfg, filebase: FilebaseStorage | None) -> None:
                 print("  Lựa chọn không hợp lệ.")
 
         elif action == "7":
-            # Chạy pipeline trên project
-            projects = pm.scan_local_projects()
+            # Chạy pipeline trên project (bao gồm cả project chỉ có trên cloud)
+            projects = _list_projects_including_cloud(pm, filebase)
             if not projects:
                 print("\n  Không tìm thấy project nào. Hãy tạo 1 project trước.")
                 continue
             selected = pm.prompt_select_project(projects)
             if selected:
+                selected = _resolve_selected_project(pm, filebase, selected)
+                if not selected:
+                    continue
                 run_pipeline_on_project(cfg, pm, selected["project_id"], filebase)
 
         else:
@@ -301,7 +336,9 @@ def run_pipeline_on_project(cfg, pm: ProjectManager, project_id: str, filebase: 
 
     # Thiết lập checkpoint manager riêng cho project, hỗ trợ micro-checkpoint
     ckpt_dir = project_dir / "checkpoints"
-    ckpt = CheckpointManager(ckpt_dir, project_id=project_id, filebase_storage=filebase)
+    auto_sync_cloud = cfg.get("processing.auto_sync_cloud", True)
+    ckpt = CheckpointManager(ckpt_dir, project_id=project_id, filebase_storage=filebase,
+                              auto_sync_cloud=auto_sync_cloud)
 
     print("\n[pipeline] Trạng thái từng stage:")
     for stage, done in ckpt.status().items():
