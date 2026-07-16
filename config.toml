@@ -1,30 +1,29 @@
 # =============================================================================
-# config.toml — cấu hình trung tâm cho AI Director Video Commentary (bản Colab)
-# Không còn dùng .env / os.getenv. Mọi module đọc cấu hình từ file này.
+# config.toml — AI Director Video Commentary (Enhanced Version)
+# All configuration from this file. No .env needed.
 # =============================================================================
 
 [api]
-# API key và endpoint cho LLM viết kịch bản (thay thế Claude built-in).
-# Model: Gemma 4 31B chạy trên Cerebras Cloud (OpenAI-compatible endpoint).
+# Cerebras API for script writing (Gemma 4 31B)
 cerebras_api_key = "csk-vdmwee9e6kpmpyxdcfkvrxrcyhekh5w6vk39nwfc9wxmpkhk"
 cerebras_base_url = "https://api.cerebras.ai/v1"
 cerebras_model = "zai-glm-4.7"
 cerebras_max_tokens = 8000
 cerebras_temperature = 0.8
 
-# Hugging Face token — chỉ cần nếu Qwen3-VL-4B-Instruct hoặc model cần auth.
+# Hugging Face token (for Qwen3-VL-4B-Instruct or other models)
 hf_token = "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"
 
-# API key cho vision backend "mistral" — độc lập với Cerebras ở trên, chỉ
-# dùng cho stage đọc ảnh (vision.py), không đụng tới engine viết kịch bản.
+# Mistral API for vision analysis
 mistral_api_key = "WJkOtf6FxncjGsfLs2mujxew0ikNIDKX"
 mistral_base_url = "https://api.mistral.ai/v1"
 
 [tts]
-# edge-tts: không cần API key, chỉ cần chọn giọng.
+# edge-tts: no API key needed, just select voice
 engine = "edge-tts"
-# Giọng mặc định. Ví dụ khác: "en-US-JennyNeural", "vi-VN-NamMinhNeural"
-voice = "vi-VN-HoaiMyNeural"
+# Vietnamese: "vi-VN-HoangMinhNeural", "vi-VN-NamMinhNeural"
+# English: "en-US-JennyNeural", "en-US-GuyNeural"
+voice = "vi-VN-HoangMinhNeural"
 rate = "+0%"
 volume = "+0%"
 pitch = "+0Hz"
@@ -34,59 +33,76 @@ pitch = "+0Hz"
 asr_model_size = "small"          # tiny/base/small/medium/large-v3
 asr_device = "auto"               # auto | cuda | cpu
 asr_compute_type = "auto"         # auto | float16 | int8
-asr_language = "vi"               # mã ngôn ngữ ASR, để trống "" để auto-detect
+asr_language = "vi"               # language code, leave empty "" for auto-detect
 
 # ---- Vision ----
-# "local"   -> Qwen3-VL-4B-Instruct chạy tại máy qua transformers (cần GPU). MẶC ĐỊNH.
-# "cerebras"-> Gemma 4 31B (multimodal, preview) qua Cerebras API.
-#   KHÔNG khuyến khích cho video nhiều scene: free tier gemma-4-31b chỉ 5 RPM /
-#   30K TPM / 1M TPD, tối đa 2 ảnh/request, 4MB payload (theo docs Cerebras).
-#   Với video ~1600 scene, riêng RPM đã mất ~5.4 giờ và tổng token vượt trần
-#   TPD 1 triệu/ngày -> sẽ dính lỗi 429 giữa chừng. Chất lượng đọc ảnh của
-#   Gemma 4 cũng được đánh giá là yếu hơn hẳn so với model vision chuyên dụng.
-#   Chỉ bật "cerebras" cho video ngắn (vài chục-vài trăm scene) hoặc khi không
-#   có GPU khả dụng.
-vision_backend = "mistral"
+# "local" (needs GPU) | "cerebras" | "mistral" (recommended for no-GPU machines)
+vision_backend = "local"
 cerebras_vision_model = "gemma-4-31b"
-cerebras_vision_max_images = 2      # free tier: tối đa 2 ảnh/request (Developer tier: 5)
-cerebras_vision_rpm = 5             # đổi thành 300 nếu đã nâng lên Developer/Pay-as-you-go
+cerebras_vision_max_images = 2
+cerebras_vision_rpm = 5
 
-# "mistral" -> model multimodal lớn nhất của Mistral (Mistral Medium 3.5) qua API
-# chính thức Mistral, dùng riêng mistral_api_key ở trên. Không thay engine viết
-# kịch bản (vẫn Cerebras/zai-glm-4.7) — chỉ đổi backend đọc ảnh scene.
+# ---- Vision backend "mistral" ----
 mistral_vision_model = "mistral-large-latest"
-mistral_vision_max_images = 8       # gửi tối đa 8 ảnh/request (nhiều hơn vision_frames_per_scene bên dưới)
-mistral_vision_rpm = 15             # throttle nhẹ phòng hờ, có tự động retry nếu dính 429
+mistral_vision_max_images = 8
+mistral_vision_rpm = 15
 
 vision_model_name = "Qwen/Qwen3-VL-4B-Instruct"
-vision_device = "auto"            # auto | cuda | cpu
-vision_dtype = "float16"          # float16 | bfloat16 | float32
+vision_device = "auto"
+vision_dtype = "float16"
 vision_max_new_tokens = 512
-vision_attn_implementation = "sdpa"  # sdpa (an toàn, luôn có) | flash_attention_2 (nhanh hơn trên Ampere+/A100/L4, tự fallback nếu GPU/lib không hỗ trợ)
-# Số scene xử lý cùng lúc trong 1 lần generate() (batch). Tăng tốc GPU rõ rệt so với
-# xử lý tuần tự từng scene, KHÔNG đổi ảnh/prompt/output nên không giảm chất lượng.
-# Tăng nếu còn dư VRAM, giảm nếu bị lỗi out-of-memory. Gợi ý: T4/16GB ~2-4, L4/24GB ~4-8, A100 ~8-16.
+vision_attn_implementation = "sdpa"
 vision_batch_size = 4
-# Số khung hình đại diện lấy ra cho mỗi scene khi phân tích thị giác.
 vision_frames_per_scene = 3
 
 # ---- Scene detection ----
-scene_threshold = 27.0            # ngưỡng PySceneDetect (ContentDetector)
+scene_threshold = 27.0
 min_scene_len_sec = 1.0
 
 # ---- Narration / storyboard ----
 narration_pov = "third_person"    # third_person | first_person
 content_type = "movie"            # movie | tv_drama | anime | short_drama | foreign_language_commentary
 genre = "drama"
-target_duration_sec = 800
-chars_per_sec = 4.0                # tốc độ đọc ước tính CHO VĂN BẢN CHỮ HÁN (số ký tự/giây)
-words_per_sec = 2.5                 # tốc độ đọc ước tính CHO TIẾNG VIỆT/TIẾNG ANH (số từ/giây)
+target_duration_sec = 180
+chars_per_sec = 4.0                # CJK characters per second
+words_per_sec = 2.5                 # Vietnamese/English words per second
 buffer_after_speech = 0.1
 min_clip_duration = 1.0
-max_speed_ratio = 4.0              # source_duration / output_duration tối đa cho phép
+max_speed_ratio = 4.0
+
+# ---- Checkpoint frequency ----
+# micro_checkpoint_interval: save checkpoint every N items (scenes/batches)
+# Lower = more frequent (near real-time). Default: 1 = every item.
+micro_checkpoint_interval = 1
+# auto_sync_cloud: auto sync to Filebase after each checkpoint
+auto_sync_cloud = true
 
 [paths]
 input_video = "./input/source.mp4"
 output_dir = "./output"
 checkpoint_dir = "./checkpoints"
 model_cache_dir = "./model_cache"
+# projects_dir: where all projects are stored
+projects_dir = "./projects"
+
+[filebase]
+# Filebase S3-compatible storage credentials
+# Access key for authentication
+access_key = "38A62F3FFC1655CB3EBB"
+# Secret key for authentication
+secret_key = "qZou610B8wxpPm29gk6iXbfu82RqdInGQ3lgQtT3"
+# Bucket name
+bucket_name = "ai-director-video"
+# Filebase S3 endpoint
+endpoint_url = "https://s3.filebase.com"
+# Enable/disable cloud sync
+enabled = true
+
+[project]
+# Default project settings
+auto_project_scan = true
+show_project_menu_on_start = true
+# Auto-save interval in seconds (0 = after each stage)
+auto_save_interval = 0
+# Max cloud sync retry attempts
+cloud_sync_retries = 3
