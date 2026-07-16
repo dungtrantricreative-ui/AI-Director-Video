@@ -77,7 +77,11 @@ class _ByteProgress:
 
 
 class FilebaseStorage:
-    """Quản lý upload/download dữ liệu project lên/từ Filebase qua S3 API."""
+    """Quản lý upload/download dữ liệu project lên/từ 1 dịch vụ lưu trữ
+    tương thích S3 (Filebase, Tigris, hoặc bất kỳ provider S3-compatible nào)
+    qua S3 API. Tên class/module giữ nguyên là "Filebase" vì lý do lịch sử,
+    nhưng logic bên trong hoàn toàn generic — chỉ cấu hình lại endpoint_url/
+    region_name/addressing_style trong config.toml là dùng được provider khác."""
 
     def __init__(
         self,
@@ -85,10 +89,12 @@ class FilebaseStorage:
         secret_key: str,
         bucket_name: str = "ai-director-video",
         endpoint_url: str = "https://s3.filebase.com",
+        region_name: str = "us-east-1",
+        addressing_style: str = "path",
         auto_create_bucket: bool = True,
     ):
         if not HAS_BOTO3:
-            raise ImportError("Cần cài boto3 để dùng Filebase storage. Chạy: pip install boto3")
+            raise ImportError("Cần cài boto3 để dùng cloud storage. Chạy: pip install boto3")
 
         self.access_key = access_key
         self.secret_key = secret_key
@@ -100,13 +106,18 @@ class FilebaseStorage:
             aws_access_key_id=access_key,
             aws_secret_access_key=secret_key,
             endpoint_url=endpoint_url,
-            # Filebase yêu cầu region_name="us-east-1" bắt buộc để tính chữ ký
-            # request (SigV4) đúng cách — không phụ thuộc region mặc định của
-            # máy/AWS profile người dùng (nếu có), tránh lỗi ký sai âm thầm.
-            region_name="us-east-1",
+            # region_name/addressing_style giờ đọc từ config.toml (mục
+            # [filebase]) thay vì hard-code riêng cho Filebase, vì mỗi
+            # provider S3-compatible yêu cầu khác nhau để tính chữ ký request
+            # (SigV4) và dựng URL đúng cách:
+            #   - Filebase: region_name="us-east-1", addressing_style="path"
+            #   - Tigris:   region_name="auto",      addressing_style="virtual"
+            # Đặt sai sẽ khiến request bị ký sai hoặc gọi nhầm URL một cách
+            # âm thầm (lỗi 403/404 khó hiểu) thay vì lỗi rõ ràng.
+            region_name=region_name,
             config=Config(
                 signature_version="s3v4",
-                s3={"addressing_style": "path"},
+                s3={"addressing_style": addressing_style},
             ),
         )
 
@@ -120,11 +131,12 @@ class FilebaseStorage:
                 self.ensure_cors()
 
     def ensure_bucket(self) -> bool:
-        """Kiểm tra bucket đã tồn tại chưa; nếu chưa, tự tạo trên Filebase.
+        """Kiểm tra bucket đã tồn tại chưa; nếu chưa, tự tạo trên storage.
 
         Trả về True nếu bucket sẵn sàng dùng được (đã có sẵn hoặc vừa tạo
         thành công), False nếu không dùng được (vd tên bucket đã bị người
-        khác dùng — tên bucket trên Filebase là DUY NHẤT TOÀN CỤC, giống S3).
+        khác dùng — tên bucket là DUY NHẤT TOÀN CỤC trên hầu hết dịch vụ
+        tương thích S3, kể cả Filebase lẫn Tigris).
         """
         try:
             self.client.head_bucket(Bucket=self.bucket_name)
@@ -529,14 +541,21 @@ class FilebaseStorage:
 
 
 def get_filebase_storage_from_config(cfg) -> FilebaseStorage | None:
-    """Tạo instance FilebaseStorage từ section [filebase] trong config.toml."""
+    """Tạo instance FilebaseStorage từ section [filebase] trong config.toml.
+
+    Đọc thêm region_name/addressing_style (mặc định giữ hành vi cũ của
+    Filebase nếu không có trong config, để không phá cấu hình cũ) — cho phép
+    dùng bất kỳ dịch vụ tương thích S3 nào (Tigris, Filebase, ...) chỉ bằng
+    cách đổi giá trị trong config.toml, không cần sửa code."""
     access_key = cfg.get("filebase.access_key", "")
     secret_key = cfg.get("filebase.secret_key", "")
     bucket = cfg.get("filebase.bucket_name", "ai-director-video")
     endpoint = cfg.get("filebase.endpoint_url", "https://s3.filebase.com")
+    region_name = cfg.get("filebase.region_name", "us-east-1")
+    addressing_style = cfg.get("filebase.addressing_style", "path")
 
     if not access_key or access_key.startswith("PASTE_"):
-        print("[filebase] Chưa cấu hình access_key — tắt tính năng sync Filebase.")
+        print("[filebase] Chưa cấu hình access_key — tắt tính năng sync cloud.")
         return None
 
     try:
@@ -545,9 +564,11 @@ def get_filebase_storage_from_config(cfg) -> FilebaseStorage | None:
             secret_key=secret_key,
             bucket_name=bucket,
             endpoint_url=endpoint,
+            region_name=region_name,
+            addressing_style=addressing_style,
         )
         if storage.bucket_ready:
-            print(f"[filebase] Bucket '{bucket}' sẵn sàng.")
+            print(f"[filebase] Bucket '{bucket}' sẵn sàng ({endpoint}).")
         else:
             print(f"[filebase] CẢNH BÁO: bucket '{bucket}' KHÔNG dùng được — "
                   f"tính năng cloud sync sẽ bị bỏ qua cho tới khi bucket được sửa "

@@ -91,16 +91,30 @@ model_cache_dir = "./model_cache"
 projects_dir = "./projects"
 
 [filebase]
-# Thông tin xác thực lưu trữ Filebase (tương thích S3)
+# Thông tin xác thực lưu trữ cloud (tương thích S3) — mục vẫn tên "[filebase]"
+# vì lý do lịch sử, nhưng dùng được với bất kỳ provider tương thích S3 nào
+# (Tigris, Filebase, v.v.), chỉ cần điền đúng endpoint_url/region_name/
+# addressing_style tương ứng bên dưới.
 # Access key để xác thực
-access_key = "PASTE_YOUR_FILEBASE_ACCESS_KEY_HERE"
+access_key = "PASTE_YOUR_ACCESS_KEY_HERE"
 # Secret key để xác thực
-secret_key = "PASTE_YOUR_FILEBASE_SECRET_KEY_HERE"
-# Tên bucket — PHẢI DUY NHẤT TOÀN CỤC trên Filebase (giống S3), hãy đổi
-# thành tên riêng của bạn, đừng dùng nguyên giá trị mặc định.
+secret_key = "PASTE_YOUR_SECRET_KEY_HERE"
+# Tên bucket — PHẢI DUY NHẤT TOÀN CỤC (giống S3), hãy đổi thành tên riêng
+# của bạn, đừng dùng nguyên giá trị mặc định.
 bucket_name = "ai-director-video"
-# Filebase S3 endpoint
-endpoint_url = "https://s3.filebase.com"
+#
+# --- Tigris (https://www.tigrisdata.com) ---
+# endpoint_url = "https://t3.storage.dev"
+# region_name = "auto"
+# addressing_style = "virtual"
+#
+# --- Filebase (https://filebase.com) ---
+# endpoint_url = "https://s3.filebase.com"
+# region_name = "us-east-1"
+# addressing_style = "path"
+endpoint_url = "https://t3.storage.dev"
+region_name = "auto"
+addressing_style = "virtual"
 # Bật/tắt tính năng sync cloud
 enabled = true
 

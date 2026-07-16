@@ -12,7 +12,7 @@ cerebras_max_tokens = 8000
 cerebras_temperature = 0.8
 
 # Hugging Face token (for Qwen3-VL-4B-Instruct or other models)
-hf_token = "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"
+hf_token = "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"
 
 # Mistral API for vision analysis
 mistral_api_key = "WJkOtf6FxncjGsfLs2mujxew0ikNIDKX"
@@ -86,15 +86,23 @@ model_cache_dir = "./model_cache"
 projects_dir = "./projects"
 
 [filebase]
-# Filebase S3-compatible storage credentials
-# Access key for authentication
-access_key = "38A62F3FFC1655CB3EBB"
-# Secret key for authentication
-secret_key = "qZou610B8wxpPm29gk6iXbfu82RqdInGQ3lgQtT3"
+# Đã chuyển từ Filebase sang Tigris (https://www.tigrisdata.com) — mục vẫn
+# tên "[filebase]" vì code (filebase_storage.py) dùng chung logic cho mọi
+# provider tương thích S3, chỉ đổi giá trị bên dưới là đủ.
+# Access key (Tigris)
+access_key = "tid_cedowsuKxoNrEXDkqMUbbWzzLrESkAoMtYsigaRjwAuEQ_jKka"
+# Secret key (Tigris)
+secret_key = "tsec_HjiP2ZS_c1f+-EmBbXB0dQ3ZjLEqadFJXHiS42OcpSxqG_H5t-57BzJxeJOU9MPGjW5IHi"
 # Bucket name
 bucket_name = "ai-director-video"
-# Filebase S3 endpoint
-endpoint_url = "https://s3.filebase.com"
+# Tigris S3 endpoint (dùng ngoài mạng Fly.io; nếu chạy trên Fly.io có thể
+# đổi sang "https://fly.storage.tigris.dev" để giảm độ trễ)
+endpoint_url = "https://t3.storage.dev"
+# Tigris dùng region "auto" (không phải vùng AWS cụ thể như Filebase)
+region_name = "auto"
+# Tigris BẮT BUỘC dùng virtual-hosted style (bucket nằm trong hostname),
+# khác với Filebase dùng "path". Đặt sai sẽ gây lỗi 403/404 khó hiểu.
+addressing_style = "virtual"
 # Enable/disable cloud sync
 enabled = true
 
