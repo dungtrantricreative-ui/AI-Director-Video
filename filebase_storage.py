@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +24,12 @@ try:
     HAS_BOTO3 = True
 except ImportError:
     HAS_BOTO3 = False
+
+try:
+    from progress_utils import print_progress_bar
+except ImportError:
+    def print_progress_bar(current, total, prefix="", suffix="", bar_len=30):
+        pass  # fallback im lặng nếu progress_utils không có sẵn (không nên xảy ra trong project này)
 
 
 class FilebaseStorage:
@@ -64,6 +72,8 @@ class FilebaseStorage:
         self.bucket_ready = False
         if auto_create_bucket:
             self.bucket_ready = self.ensure_bucket()
+            if self.bucket_ready:
+                self.ensure_cors()
 
     def ensure_bucket(self) -> bool:
         """Kiểm tra bucket đã tồn tại chưa; nếu chưa, tự tạo trên Filebase.
@@ -114,6 +124,44 @@ class FilebaseStorage:
             print(f"[filebase] Upload thất bại cho {remote_key}: {e}")
             return False
 
+    def upload_public(self, local_path: Path, remote_key: str) -> bool:
+        """Upload 1 file với ACL public-read — CHỈ dùng cho status.json (để
+        dashboard web/mobile đọc trực tiếp qua URL công khai, không cần
+        access_key/secret_key). Mọi file khác (video, checkpoint, output)
+        vẫn phải dùng _upload_file() (private) như cũ."""
+        try:
+            self.client.upload_file(
+                str(local_path), self.bucket_name, remote_key,
+                ExtraArgs={"ACL": "public-read"},
+            )
+            return True
+        except Exception as e:
+            print(f"[filebase] Upload public thất bại cho {remote_key}: {e}")
+            return False
+
+    def ensure_cors(self) -> bool:
+        """Bật CORS (allow GET từ mọi origin) cho bucket, để trình duyệt
+        (dashboard web chạy trên điện thoại) fetch được status.json công khai
+        trực tiếp từ Filebase. Không ảnh hưởng quyền riêng tư của các file
+        khác — CORS chỉ quyết định trình duyệt nào được ĐỌC file ĐÃ public,
+        không tự động public hoá file private."""
+        try:
+            self.client.put_bucket_cors(
+                Bucket=self.bucket_name,
+                CORSConfiguration={
+                    "CORSRules": [{
+                        "AllowedOrigins": ["*"],
+                        "AllowedMethods": ["GET"],
+                        "AllowedHeaders": ["*"],
+                        "MaxAgeSeconds": 3600,
+                    }]
+                },
+            )
+            return True
+        except Exception as e:
+            print(f"[filebase] Không bật được CORS (dashboard web có thể không đọc được status.json): {e}")
+            return False
+
     def _download_file(self, remote_key: str, local_path: Path) -> bool:
         """Tải 1 file từ Filebase về."""
         try:
@@ -157,7 +205,7 @@ class FilebaseStorage:
         except Exception:
             return None
 
-    def upload_project(self, project_dir: Path, project_id: str) -> dict[str, Any]:
+    def upload_project(self, project_dir: Path, project_id: str, max_workers: int = 16) -> dict[str, Any]:
         """Upload toàn bộ thư mục project (bao gồm input/ chứa video gốc,
         checkpoints/, output/) lên Filebase.
 
@@ -167,7 +215,11 @@ class FilebaseStorage:
         đổi giữa các lần sync, ta so kích thước với bản đã có trên cloud
         (head_object) và bỏ qua nếu trùng, để tránh upload lại hàng GB không
         cần thiết mỗi lần đồng bộ.
-        """
+
+        Upload SONG SONG (giống download_project()) vì project thường có
+        hàng ngàn file keyframe nhỏ — tuần tự từng file sẽ bị chặn bởi độ
+        trễ mạng (latency) chứ không phải băng thông, dù mỗi file tự nó
+        upload nhanh."""
         if not self.bucket_ready:
             print(f"[filebase] Bỏ qua đồng bộ: bucket '{self.bucket_name}' chưa sẵn sàng "
                   f"(xem lỗi ensure_bucket ở trên).")
@@ -175,30 +227,54 @@ class FilebaseStorage:
                     "aborted": True}
 
         remote_prefix = f"projects/{project_id}/"
-        uploaded = []
-        skipped = []
-        errors = []
 
+        candidates = []
         for local_file in project_dir.rglob("*"):
             if local_file.is_dir():
                 continue
             if local_file.name.startswith("_") and local_file.name.endswith(".json"):
-                # Bỏ qua file meta, sẽ upload riêng ở dưới
                 continue
             rel = local_file.relative_to(project_dir)
             remote_key = f"{remote_prefix}{rel.as_posix()}"
+            candidates.append((local_file, remote_key))
 
+        total = len(candidates)
+        uploaded: list[str] = []
+        skipped: list[str] = []
+        errors: list[str] = []
+        lock = threading.Lock()
+        start = time.time()
+
+        print_progress_bar(0, total, prefix="[filebase] upload", suffix=f"0/{total} file")
+
+        def _job(local_file: Path, remote_key: str) -> tuple[str, str]:
+            """Trả về (remote_key, 'uploaded'|'skipped'|'error')."""
             local_size = local_file.stat().st_size
             remote_size = self._remote_size(remote_key)
             if remote_size is not None and remote_size == local_size:
-                skipped.append(remote_key)
-                continue
-
+                return remote_key, "skipped"
             ok = self._upload_file(local_file, remote_key)
-            if ok:
-                uploaded.append(remote_key)
-            else:
-                errors.append(remote_key)
+            return remote_key, ("uploaded" if ok else "error")
+
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = [pool.submit(_job, lf, rk) for lf, rk in candidates]
+            done = 0
+            for future in as_completed(futures):
+                remote_key, status = future.result()
+                with lock:
+                    done += 1
+                    if status == "uploaded":
+                        uploaded.append(remote_key)
+                    elif status == "skipped":
+                        skipped.append(remote_key)
+                    else:
+                        errors.append(remote_key)
+                    elapsed = time.time() - start
+                    speed = done / elapsed if elapsed > 0 else 0
+                    print_progress_bar(
+                        done, total, prefix="[filebase] upload",
+                        suffix=f"{done}/{total} file, {speed:.1f} file/s",
+                    )
 
         # Upload metadata của lần sync này
         meta = {
@@ -214,6 +290,10 @@ class FilebaseStorage:
         self._upload_file(meta_file, f"{remote_prefix}_upload_meta.json")
         meta_file.unlink(missing_ok=True)
 
+        elapsed = time.time() - start
+        print(f"[filebase] Upload xong trong {elapsed:.1f}s: {len(uploaded)} file tải lên, "
+              f"{len(skipped)} bỏ qua (đã có sẵn), {len(errors)} lỗi.")
+
         return {
             "uploaded": len(uploaded),
             "skipped": len(skipped),
@@ -221,8 +301,17 @@ class FilebaseStorage:
             "error_files": errors,
         }
 
-    def download_project(self, project_id: str, local_dir: Path) -> bool:
-        """Tải 1 project từ Filebase về thư mục cục bộ (bao gồm input/video)."""
+    def download_project(self, project_id: str, local_dir: Path, max_workers: int = 16) -> bool:
+        """Tải 1 project từ Filebase về thư mục cục bộ (bao gồm input/video).
+
+        Tải SONG SONG (ThreadPoolExecutor) thay vì tuần tự từng file một.
+        Lý do: project thường có hàng ngàn file NHỎ (keyframe .jpg trích ra
+        từ preprocess, 3 file/scene) — với overhead ký request + bắt tay TLS
+        cỡ vài trăm ms/request, tải tuần tự 1 file/lần khiến tổng thời gian
+        bị CHẶN BỞI ĐỘ TRỄ (latency-bound) chứ không phải bởi băng thông
+        (bandwidth-bound), dù mỗi file tự nó tải rất nhanh. Tải song song
+        16 luồng giấu bớt độ trễ đó, giảm tổng thời gian gần theo tỉ lệ số
+        luồng (tất nhiên vẫn giới hạn bởi băng thông thật của kết nối)."""
         if not self.bucket_ready:
             print(f"[filebase] Không tải được: bucket '{self.bucket_name}' chưa sẵn sàng.")
             return False
@@ -233,22 +322,46 @@ class FilebaseStorage:
             return False
 
         local_dir.mkdir(parents=True, exist_ok=True)
-        downloaded = 0
+        to_download = []
         for remote_key in files:
             if remote_key.endswith("/"):
                 continue
             rel = remote_key[len(remote_prefix):]
             if not rel or rel.startswith("_"):
                 continue
-            local_file = local_dir / rel
-            ok = self._download_file(remote_key, local_file)
-            if ok:
-                downloaded += 1
-            else:
-                print(f"[filebase] Tải thất bại: {rel}")
+            to_download.append((remote_key, local_dir / rel))
 
-        print(f"[filebase] Đã tải {downloaded} file về {local_dir}")
-        return True
+        total = len(to_download)
+        downloaded = 0
+        failed: list[str] = []
+        lock = threading.Lock()
+        start = time.time()
+
+        print_progress_bar(0, total, prefix="[filebase] download", suffix=f"0/{total} file")
+
+        def _job(remote_key: str, local_file: Path) -> tuple[str, bool]:
+            ok = self._download_file(remote_key, local_file)
+            return remote_key, ok
+
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = [pool.submit(_job, rk, lf) for rk, lf in to_download]
+            for future in as_completed(futures):
+                remote_key, ok = future.result()
+                with lock:
+                    downloaded += 1
+                    if not ok:
+                        failed.append(remote_key)
+                    elapsed = time.time() - start
+                    speed = downloaded / elapsed if elapsed > 0 else 0
+                    print_progress_bar(
+                        downloaded, total, prefix="[filebase] download",
+                        suffix=f"{downloaded}/{total} file, {speed:.1f} file/s",
+                    )
+
+        elapsed = time.time() - start
+        print(f"[filebase] Đã tải {downloaded - len(failed)}/{total} file về {local_dir} "
+              f"trong {elapsed:.1f}s ({len(failed)} lỗi)" + (f": {failed[:5]}..." if failed else "."))
+        return len(failed) == 0 or (downloaded - len(failed)) > 0
 
     def list_remote_projects(self) -> list[dict[str, Any]]:
         """Liệt kê tất cả project đang lưu trên Filebase."""
