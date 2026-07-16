@@ -171,20 +171,46 @@ def detect_scenes(
     return scenes
 
 
+def _resize_for_vision(frame, max_side: int = 768):
+    """
+    Thu nhỏ frame để cạnh dài nhất <= max_side, giữ nguyên tỉ lệ khung hình.
+    Lý do: VLM (Qwen3-VL) dùng dynamic-resolution -> số vision token tỉ lệ
+    thuận với số pixel ảnh đưa vào. Ảnh full-res 1080p/4K khiến 1 lần
+    generate() cần cấp phát nhiều GiB VRAM dù batch_size=1 (đây là nguyên
+    nhân gốc gây OOM, không phải do batch_size). Giới hạn 768px vẫn đủ để
+    model đọc bố cục/cảnh/nhân vật/chữ lớn, không ảnh hưởng đáng kể chất
+    lượng phân tích scene. Không upscale ảnh vốn đã nhỏ hơn max_side.
+    """
+    h, w = frame.shape[:2]
+    longest = max(h, w)
+    if longest <= max_side:
+        return frame
+    scale = max_side / longest
+    new_w, new_h = max(1, round(w * scale)), max(1, round(h * scale))
+    return cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
+
 def extract_keyframes(
     video_path: Path,
     scenes: list[dict[str, float]],
     out_dir: Path,
     frames_per_scene: int = 3,
+    max_side: int = 768,
+    jpeg_quality: int = 90,
 ) -> dict[str, list[str]]:
     """
     Với mỗi scene, trích ra `frames_per_scene` khung hình đại diện
-    (đầu / giữa / cuối) và lưu thành ảnh .jpg trong out_dir.
-    Trả về map scene_id -> [đường dẫn ảnh].
+    (đầu / giữa / cuối), resize cạnh dài nhất về `max_side` px (giữ tỉ lệ)
+    rồi lưu thành ảnh .jpg trong out_dir. Trả về map scene_id -> [đường dẫn ảnh].
+
+    Resize ngay khi trích (thay vì để full-res rồi resize lúc infer) vừa
+    giảm VRAM cần cho vision model, vừa giảm dung lượng đĩa/I-O, vừa giúp
+    generate() nhanh hơn đáng kể vì ít vision token hơn hẳn.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     cap = cv2.VideoCapture(str(video_path))
     fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+    encode_params = [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality]
 
     keyframes: dict[str, list[str]] = {}
     total_scenes = len(scenes)
@@ -207,8 +233,9 @@ def extract_keyframes(
                 ok, frame = cap.read()
                 if not ok:
                     continue
+                frame = _resize_for_vision(frame, max_side=max_side)
                 out_path = out_dir / f"{scene_id}_{i}.jpg"
-                cv2.imwrite(str(out_path), frame)
+                cv2.imwrite(str(out_path), frame, encode_params)
                 paths.append(str(out_path))
             keyframes[scene_id] = paths
             print_progress_bar(scene_idx, total_scenes, prefix="[preprocess] keyframes", suffix=scene_id)
@@ -241,9 +268,15 @@ def run_preprocess(cfg, checkpoint_mgr=None) -> dict[str, Any]:
     print(f"[preprocess]      -> Tìm thấy {len(scenes)} scene.")
 
     frames_per_scene = cfg.get("processing.vision_frames_per_scene", 3)
+    keyframe_max_side = cfg.get("processing.keyframe_max_side", 768)
+    keyframe_jpeg_quality = cfg.get("processing.keyframe_jpeg_quality", 90)
     keyframes_dir = pipeline_dir / "keyframes"
-    print(f"[preprocess] (4/4) Extracting keyframes ({frames_per_scene}/scene, {len(scenes)} scene)...")
-    keyframes = extract_keyframes(video_path, scenes, keyframes_dir, frames_per_scene)
+    print(f"[preprocess] (4/4) Extracting keyframes ({frames_per_scene}/scene, {len(scenes)} scene, "
+          f"max_side={keyframe_max_side}px)...")
+    keyframes = extract_keyframes(
+        video_path, scenes, keyframes_dir, frames_per_scene,
+        max_side=keyframe_max_side, jpeg_quality=keyframe_jpeg_quality,
+    )
 
     # Micro-checkpoint: save after each keyframe batch
     if checkpoint_mgr is not None:

@@ -52,8 +52,23 @@ vision_device = "auto"
 vision_dtype = "float16"
 vision_max_new_tokens = 512
 vision_attn_implementation = "sdpa"
-vision_batch_size = 4
+# Đã tăng từ 4 -> 8: sau khi keyframe được resize (xem keyframe_max_side bên dưới),
+# mỗi ảnh dùng ít VRAM hơn nhiều lần nên có thể gộp nhiều scene/batch hơn mà
+# vẫn không OOM. Nếu máy vẫn OOM, hạ số này xuống trước (không cần đụng vào
+# keyframe_max_side).
+vision_batch_size = 8
 vision_frames_per_scene = 3
+
+# ---- Keyframe resize (fix OOM gốc + tăng tốc) ----
+# Trước đây keyframe được lưu ở đúng độ phân giải gốc của video (1080p/4K),
+# khiến Qwen3-VL (dynamic-resolution) sinh ra rất nhiều vision token và cần
+# hàng GiB VRAM chỉ cho 1 lần forward (kể cả batch_size=1). Resize cạnh dài
+# nhất về keyframe_max_side px trước khi lưu giúp giảm VRAM + tăng tốc
+# generate() đáng kể, trong khi 768px vẫn đủ để model đọc bố cục/cảnh/nhân
+# vật/chữ lớn. Có thể tăng lên 960-1024 nếu cần đọc chữ nhỏ chính xác hơn
+# và VRAM còn dư, hoặc hạ xuống 512-576 nếu vẫn OOM.
+keyframe_max_side = 768
+keyframe_jpeg_quality = 90
 
 # ---- Scene detection ----
 scene_threshold = 27.0
@@ -94,7 +109,7 @@ access_key = "tid_cedowsuKxoNrEXDkqMUbbWzzLrESkAoMtYsigaRjwAuEQ_jKka"
 # Secret key (Tigris)
 secret_key = "tsec_HjiP2ZS_c1f+-EmBbXB0dQ3ZjLEqadFJXHiS42OcpSxqG_H5t-57BzJxeJOU9MPGjW5IHi"
 # Bucket name
-bucket_name = "ai-director-video-ngoc-quynh"
+bucket_name = "ai-director-video"
 # Tigris S3 endpoint (dùng ngoài mạng Fly.io; nếu chạy trên Fly.io có thể
 # đổi sang "https://fly.storage.tigris.dev" để giảm độ trễ)
 endpoint_url = "https://t3.storage.dev"
