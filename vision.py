@@ -483,49 +483,81 @@ def run_vision_analysis(cfg, preprocess_result: dict[str, Any], checkpoint_mgr=N
     scenes = preprocess_result["scenes"]
     keyframes = preprocess_result["keyframes"]
 
-    analyzer = _build_analyzer(cfg)
-    analyzer.load()
-
-    results: list[dict[str, Any]] = []
     total_scenes = len(scenes)
+    micro_interval = cfg.get("processing.micro_checkpoint_interval", 1)
+
+    # --- Resume: tải các scene đã có micro-checkpoint từ lần chạy trước ---
+    # Mỗi scene được checkpoint RIÊNG LẺ (key = scene_id), nên ta có thể biết
+    # chính xác scene nào đã xong mà không cần chạy lại từ đầu.
+    results_by_scene: dict[str, dict[str, Any]] = {}
+    if checkpoint_mgr is not None:
+        done_ids = checkpoint_mgr.list_micro_done("vision")
+        for scene in scenes:
+            sid = scene["scene_id"]
+            if sid in done_ids:
+                try:
+                    results_by_scene[sid] = checkpoint_mgr.load_micro("vision", sid)
+                except (OSError, json.JSONDecodeError, KeyError):
+                    pass  # file lỗi/hỏng -> coi như chưa xong, phân tích lại
+
+        if results_by_scene:
+            print(f"[vision] Tìm thấy checkpoint: {len(results_by_scene)}/{total_scenes} "
+                  f"scene đã phân tích trước đó, sẽ bỏ qua và chỉ chạy tiếp phần còn lại.")
+
+    remaining_scenes = [s for s in scenes if s["scene_id"] not in results_by_scene]
+
+    analyzer = _build_analyzer(cfg)
     batch_size = getattr(analyzer, "batch_size", 1)
 
-    try:
-        if hasattr(analyzer, "analyze_batch"):
-            # Backend "local": gom nhiều scene / lần generate() -> tận dụng GPU tốt hơn,
-            # cùng ảnh/cùng prompt/cùng max_new_tokens cho mỗi scene nên chất lượng không đổi.
-            done = 0
-            for i in range(0, total_scenes, batch_size):
-                chunk = scenes[i:i + batch_size]
-                batch_input = [(s["scene_id"], keyframes.get(s["scene_id"], [])) for s in chunk]
-                batch_results = analyzer.analyze_batch(batch_input)
-                for scene, analysis in zip(chunk, batch_results):
+    if remaining_scenes:
+        analyzer.load()
+        try:
+            if hasattr(analyzer, "analyze_batch"):
+                done = total_scenes - len(remaining_scenes)
+                for i in range(0, len(remaining_scenes), batch_size):
+                    chunk = remaining_scenes[i:i + batch_size]
+                    batch_input = [(s["scene_id"], keyframes.get(s["scene_id"], [])) for s in chunk]
+                    batch_results = analyzer.analyze_batch(batch_input)
+                    for scene, analysis in zip(chunk, batch_results):
+                        analysis["start"] = scene["start"]
+                        analysis["end"] = scene["end"]
+                        results_by_scene[scene["scene_id"]] = analysis
+                    done += len(chunk)
+                    print_progress_bar(
+                        done, total_scenes,
+                        prefix="[vision] analyzing",
+                        suffix=f"batch {i // batch_size + 1} ({len(chunk)} scene)",
+                    )
+                    # Micro-checkpoint TỪNG SCENE (không phải copy cả list kết
+                    # quả) -> mỗi file chỉ chứa đúng 1 scene, resume được và
+                    # không tốn ổ đĩa/API tăng dần theo cấp số.
+                    if checkpoint_mgr is not None and done % micro_interval == 0:
+                        for scene, analysis in zip(chunk, batch_results):
+                            checkpoint_mgr.save_micro("vision", scene["scene_id"], analysis)
+            else:
+                total_remaining = len(remaining_scenes)
+                for scene_idx, scene in enumerate(remaining_scenes, start=1):
+                    scene_id = scene["scene_id"]
+                    frame_paths = keyframes.get(scene_id, [])
+                    analysis = analyzer.analyze_scene(scene_id, frame_paths)
                     analysis["start"] = scene["start"]
                     analysis["end"] = scene["end"]
-                    results.append(analysis)
-                done += len(chunk)
-                print_progress_bar(
-                    done, total_scenes,
-                    prefix="[vision] analyzing",
-                    suffix=f"batch {i // batch_size + 1} ({len(chunk)} scene)",
-                )
-        else:
-            # Backend "cerebras": vẫn từng scene một, do bị giới hạn RPM/ảnh mỗi request.
-            for scene_idx, scene in enumerate(scenes, start=1):
-                scene_id = scene["scene_id"]
-                frame_paths = keyframes.get(scene_id, [])
-                analysis = analyzer.analyze_scene(scene_id, frame_paths)
-                analysis["start"] = scene["start"]
-                analysis["end"] = scene["end"]
-                results.append(analysis)
-                print_progress_bar(
-                    scene_idx, total_scenes,
-                    prefix="[vision] analyzing",
-                    suffix=f"{scene_id} ({len(frame_paths)} frames)",
-                )
-    finally:
-        # Dọn VRAM/API client ngay cả khi có lỗi giữa chừng.
-        analyzer.unload()
+                    results_by_scene[scene_id] = analysis
+                    done_total = total_scenes - total_remaining + scene_idx
+                    print_progress_bar(
+                        done_total, total_scenes,
+                        prefix="[vision] analyzing",
+                        suffix=f"{scene_id} ({len(frame_paths)} frames)",
+                    )
+                    if checkpoint_mgr is not None and scene_idx % micro_interval == 0:
+                        checkpoint_mgr.save_micro("vision", scene_id, analysis)
+        finally:
+            analyzer.unload()
+    else:
+        print("[vision] Tất cả scene đã có checkpoint, bỏ qua bước phân tích.")
+
+    # Ghép kết quả theo đúng thứ tự scene gốc.
+    results: list[dict[str, Any]] = [results_by_scene[s["scene_id"]] for s in scenes]
 
     with open(pipeline_dir / "vision_analysis.json", "w", encoding="utf-8") as f:
         json.dump(results, f, ensure_ascii=False, indent=2)

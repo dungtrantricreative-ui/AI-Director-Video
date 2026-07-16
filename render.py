@@ -235,11 +235,21 @@ def run_render(cfg, storyboard: dict[str, Any], tts_result: dict[str, Any] | Non
 
     clip_paths = []
     total_clips = len(storyboard["timeline"])
+    micro_interval = cfg.get("processing.micro_checkpoint_interval", 1)
+
     for idx, clip in enumerate(storyboard["timeline"], start=1):
         out_path = clips_dir / f"{clip['clip_id']}.mp4"
         render_clip(input_video, clip, tts_audio_map.get(clip["clip_id"]), out_path, max_speed_ratio)
         clip_paths.append(out_path)
         print_progress_bar(idx, total_clips, prefix="[render] clips", suffix=clip["clip_id"])
+
+        # Micro-checkpoint per clip
+        if checkpoint_mgr is not None and idx % micro_interval == 0:
+            checkpoint_mgr.save_micro("render", clip["clip_id"], {
+                "clip_id": clip["clip_id"],
+                "clip_path": str(out_path),
+                "progress": f"{idx}/{total_clips}",
+            })
 
     final_path = deliverables_dir / "final_preview.mp4"
     print("[render] Ghép các clip thành final_preview.mp4...")

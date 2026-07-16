@@ -1,10 +1,11 @@
-# AI Director Video Commentary — chạy được trên Colab, Linux, macOS, Windows.
-# Không còn python-dotenv. Cấu hình đọc từ config.toml (tomllib/tomli).
+# AI Director Video Commentary — Enhanced with Project Management & Filebase
+# Runs on Colab, Linux, macOS, Windows.
+# Config from config.toml (tomllib/tomli).
 
 # --- Config ---
 tomli>=2.0.1; python_version < "3.11"
 
-# --- System info (tuỳ chọn, dùng bởi platform_utils.print_system_info) ---
+# --- System info (optional, used by platform_utils.print_system_info) ---
 psutil>=5.9.0
 
 # --- ASR ---
@@ -33,6 +34,5 @@ pydantic>=2.12.0
 srt>=3.5.3
 numpy>=1.26.0
 
-# --- Lưu trữ tuỳ chọn trên Cloudflare R2 (chỉ cần nếu bật [storage] trong config.toml) ---
-# run.py tự cài package này nếu phát hiện r2_access_key_id đã được điền.
-# boto3>=1.34.0
+# --- Filebase / Cloud storage (S3-compatible) ---
+boto3>=1.34.0

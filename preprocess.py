@@ -245,6 +245,17 @@ def run_preprocess(cfg, checkpoint_mgr=None) -> dict[str, Any]:
     print(f"[preprocess] (4/4) Extracting keyframes ({frames_per_scene}/scene, {len(scenes)} scene)...")
     keyframes = extract_keyframes(video_path, scenes, keyframes_dir, frames_per_scene)
 
+    # Micro-checkpoint: save after each keyframe batch
+    if checkpoint_mgr is not None:
+        micro_interval = cfg.get("processing.micro_checkpoint_interval", 1)
+        for i in range(0, len(scenes), micro_interval):
+            chunk = scenes[i:i + micro_interval]
+            chunk_keyframes = {s["scene_id"]: keyframes.get(s["scene_id"], []) for s in chunk}
+            checkpoint_mgr.save_micro("preprocess", f"keyframes_{i}", {
+                "scenes_chunk": chunk,
+                "keyframes_chunk": chunk_keyframes,
+            })
+
     with open(pipeline_dir / "scenes.json", "w", encoding="utf-8") as f:
         json.dump(scenes, f, ensure_ascii=False, indent=2)
 

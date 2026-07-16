@@ -36,16 +36,54 @@ async def _synthesize_all(
     volume: str,
     pitch: str,
     out_dir: Path,
+    checkpoint_mgr=None,
 ) -> list[Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
     paths = []
     total = len(sentences)
-    # edge-tts qua mạng — chạy tuần tự để tránh bị rate-limit/timeout hàng loạt.
+
+    # --- Resume: bỏ qua câu đã tổng hợp xong ở lần chạy trước ---
+    # Đây là bước dễ bị ngắt nhất (gọi mạng tuần tự cho từng câu), nên phải
+    # checkpoint NGAY sau mỗi câu, không phải đợi xong hết vòng lặp mới ghi.
+    done_ids: set[str] = set()
+    if checkpoint_mgr is not None:
+        done_ids = checkpoint_mgr.list_micro_done("tts")
+
+    n_skipped = 0
     for i, sent in enumerate(sentences, start=1):
-        out_path = out_dir / f"{sent['clip_id']}.mp3"
+        clip_id = sent["clip_id"]
+        out_path = out_dir / f"{clip_id}.mp3"
+
+        if clip_id in done_ids and out_path.exists():
+            # Đã tổng hợp xong ở lần chạy trước và file audio vẫn còn -> bỏ qua.
+            paths.append(out_path)
+            n_skipped += 1
+            print_progress_bar(i, total, prefix="[tts] synthesizing", suffix=f"{clip_id} (cached)")
+            continue
+
+        # edge-tts qua mạng — chạy tuần tự để tránh bị rate-limit/timeout hàng loạt.
         await _synthesize_one(sent["sentence"], voice, rate, volume, pitch, out_path)
         paths.append(out_path)
-        print_progress_bar(i, total, prefix="[tts] synthesizing", suffix=sent["clip_id"])
+        print_progress_bar(i, total, prefix="[tts] synthesizing", suffix=clip_id)
+
+        # Micro-checkpoint NGAY sau khi câu này xong — đây chính là chỗ dễ bị
+        # ngắt mạng/treo nhất trong cả pipeline, nên không thể đợi tổng hợp
+        # xong hết mới ghi checkpoint (nếu vậy bị ngắt giữa chừng sẽ mất sạch,
+        # y như không có checkpoint).
+        if checkpoint_mgr is not None:
+            checkpoint_mgr.save_micro("tts", clip_id, {
+                "clip_id": clip_id,
+                "audio_path": str(out_path),
+            })
+
+    if checkpoint_mgr is not None and sentences:
+        # Đảm bảo checkpoint của câu cuối luôn lên cloud, không phụ thuộc
+        # đúng bội số của chu kỳ throttle.
+        checkpoint_mgr.force_sync_micro("tts", sentences[-1]["clip_id"])
+
+    if n_skipped:
+        print(f"[tts] Bỏ qua {n_skipped}/{total} câu đã tổng hợp sẵn (resume từ checkpoint).")
+
     return paths
 
 
@@ -112,7 +150,9 @@ def run_tts(cfg, storyboard: dict[str, Any], checkpoint_mgr=None) -> dict[str, A
 
     sentences = storyboard["timeline"]
     print(f"[tts] Synthesizing {len(sentences)} câu bằng edge-tts (voice={voice})...")
-    clip_audio_paths = asyncio.run(_synthesize_all(sentences, voice, rate, volume, pitch, tts_dir))
+    clip_audio_paths = asyncio.run(
+        _synthesize_all(sentences, voice, rate, volume, pitch, tts_dir, checkpoint_mgr=checkpoint_mgr)
+    )
 
     # Đo lại thời lượng thực tế TTS để phát hiện lệch lớn so với output_duration ước tính.
     actual_durations = []

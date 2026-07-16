@@ -1,336 +1,311 @@
-# AI Director — Video Commentary Pipeline
+# AI Director Video Commentary — Enhanced Version
 
-Pipeline Python độc lập, tự động tạo video bình luận/thuyết minh (review phim,
-tóm tắt phim, "recap") từ một file video gốc: tách audio → nhận diện scene →
-ASR → phân tích hình ảnh → viết kịch bản (hook + lời bình) → TTS → dựng video
-cuối cùng kèm phụ đề.
+An AI-powered video commentary pipeline that automatically generates narrated commentary videos from any input video. Features project management, Filebase cloud sync, and near real-time checkpointing.
 
-Chạy được trên **Google Colab, Linux, macOS và Windows** — không phụ thuộc
-vào bất kỳ nền tảng cụ thể nào.
+## What This Does
 
-> Dự án này là bản viết lại độc lập bằng Python, bám theo đúng schema/thuật
-> toán mô tả trong repo skill gốc `ai-director-video-commentary` (vốn được
-> thiết kế cho Claude Code agent, không phải code chạy được). Xem chi tiết
-> khác biệt ở mục [Nguồn gốc & khác biệt](#nguồn-gốc--khác-biệt) bên dưới.
+Input: Any video file (movie clip, drama scene, etc.)
+Output: A new video with AI-generated voiceover commentary, properly synced with the original footage, plus SRT subtitles.
 
-## Mục lục
+**Pipeline stages:**
+1. **Preprocess** — Probe video, extract audio, detect scenes, extract keyframes
+2. **ASR** — Speech-to-text transcription using faster-whisper
+3. **Vision** — AI analyzes each scene's visual content
+4. **Semantic Graph** — Combines audio + visual analysis into structured blocks
+5. **Script** — AI writes viral-style narration commentary
+6. **TTS** — Text-to-speech voiceover generation
+7. **Render** — Final video assembly with synced commentary
 
-- [Yêu cầu hệ thống](#yêu-cầu-hệ-thống)
-- [Cấu trúc project](#cấu-trúc-project)
-- [Cài đặt](#cài-đặt)
-- [Cấu hình](#cấu-hình)
-- [Chạy pipeline](#chạy-pipeline)
-- [Kết quả](#kết-quả)
-- [Checkpoint / resume](#checkpoint--resume)
-- [Giới hạn / điều cần biết](#giới-hạn--điều-cần-biết)
-- [Nguồn gốc & khác biệt](#nguồn-gốc--khác-biệt)
+---
 
-## Yêu cầu hệ thống
+## Quick Start
 
-- Python **3.10+** (khuyến nghị 3.11+ để có `tomllib` built-in)
-- FFmpeg (chạy `run.py` sẽ tự dò và cài nếu thiếu, nhưng khuyến nghị cài sẵn
-  thủ công theo hướng dẫn ở mục Cài đặt để chắc chắn không lỗi)
-- GPU NVIDIA (CUDA) hoặc Apple Silicon (MPS) để chạy nhanh; vẫn chạy được
-  trên CPU nhưng chậm hơn nhiều ở bước phân tích hình ảnh
-- Cerebras API key (bắt buộc, dùng để sinh kịch bản) — lấy tại
-  [cloud.cerebras.ai](https://cloud.cerebras.ai)
-
-## Cấu trúc project
-
-Toàn bộ project nằm phẳng trong một thư mục duy nhất — **không có thư mục
-con nào cả** (không `modules/`, không `scripts/`, không `references/`), để
-clone/deploy lên GitHub nhanh và đơn giản nhất có thể:
-
-```
-ai-director/
-  config.py                     ← loader TOML dùng chung cho mọi module
-  checkpoint.py                  ← quản lý checkpoint/resume
-  platform_utils.py              ← tiện ích đa nền tảng (ffmpeg, GPU/device detection)
-  preprocess.py                  ← ffprobe, tách audio, scene detection, keyframes
-  asr.py                          ← faster-whisper
-  vision.py                       ← Qwen3-VL-4B-Instruct (transformers)
-  semantic_graph.py               ← hợp nhất ASR + vision thành semantic blocks
-  script_writer.py                ← LLM (Cerebras) viết hook + narration + storyboard
-  tts.py                           ← edge-tts
-  render.py                        ← ffmpeg render + validate SRT/video
-  storyboard_to_srt.py             ← CLI: xuất SRT từ storyboard.json
-  validate_storyboard.py           ← CLI: validate storyboard.json theo schema
-  run.py                            ← entry point duy nhất, chạy toàn bộ pipeline
-  config.toml.example              ← mẫu cấu hình, copy thành config.toml rồi điền key
-  requirements.txt
-  ref-*.md, ref-*.json, ref-*.srt   ← tài liệu schema gốc (Video Semantic Graph, Storyboard...)
-```
-
-Các thư mục dữ liệu (`input/`, `output/`, `checkpoints/`, `model_cache/`)
-**không có sẵn trong repo** — code tự tạo bằng `mkdir(parents=True,
-exist_ok=True)` ngay khi cần (checkpoint đầu tiên, video đầu ra, model tải
-về...), nên không cần commit thư mục rỗng lên GitHub. Bạn chỉ cần tự tạo
-`input/` (hoặc trỏ `paths.input_video` sang nơi khác) khi đặt video nguồn vào.
-
-## Cài đặt
-
-Không có script setup tự động — cài đặt hoàn toàn thủ công, từng bước một
-để bạn biết chính xác máy mình đang có gì và pipeline cần gì. Tất cả lệnh
-dưới đây chạy từ bên trong thư mục `ai-director/`.
-
-### Bước 1 — Cài FFmpeg
+### 1. Install Requirements
 
 ```bash
-# Linux (Debian/Ubuntu, Colab dùng bản này)
-sudo apt-get update && sudo apt-get install -y ffmpeg
-
-# macOS (Homebrew)
-brew install ffmpeg
-
-# Windows (winget)
-winget install Gyan.FFmpeg
-```
-
-Kiểm tra đã cài đúng chưa:
-
-```bash
-ffmpeg -version
-ffprobe -version
-```
-
-Nếu 2 lệnh trên báo lỗi "command not found" nghĩa là FFmpeg chưa nằm trong
-`PATH` — cài lại hoặc thêm thủ công vào `PATH` trước khi qua bước 2.
-
-### Bước 2 — Cài Python packages
-
-```bash
-# (khuyến nghị) tạo virtualenv trước để không đụng Python hệ thống
-python3 -m venv .venv
-source .venv/bin/activate          # Windows (PowerShell): .venv\Scripts\Activate.ps1
-
-# máy KHÔNG có GPU NVIDIA: cài torch bản CPU-only trước (nhẹ hơn nhiều, đỡ
-# tốn ổ đĩa vì bản mặc định trên PyPI kèm theo thư viện CUDA không dùng tới)
-pip install torch --index-url https://download.pytorch.org/whl/cpu
-
-# rồi cài phần còn lại
 pip install -r requirements.txt
 ```
 
-Nếu máy CÓ GPU NVIDIA và muốn dùng CUDA, bỏ qua dòng `--index-url` ở trên,
-chạy thẳng `pip install -r requirements.txt` (torch sẽ tự chọn bản có CUDA).
+### 2. Configure
 
-### Bước 3 — Tạo config.toml và điền key
+Edit `config.toml` with your API keys:
+
+```toml
+[api]
+cerebras_api_key = "your-cerebras-key"
+mistral_api_key = "your-mistral-key"
+
+[filebase]
+access_key = "38A62F3FFC1655CB3EBB"
+secret_key = "qZou610B8wxpPm29gk6iXbfu82RqdInGQ3lgQtT3"
+bucket_name = "ai-director-video"
+endpoint_url = "https://s3.filebase.com"
+enabled = true
+```
+
+### 3. Run
 
 ```bash
-cp config.toml.example config.toml    # Windows (PowerShell): copy config.toml.example config.toml
+python run.py
 ```
 
-Mở `config.toml` bằng bất kỳ text editor nào và điền tối thiểu:
+You'll see the project management menu:
 
-- `[api] cerebras_api_key` — **bắt buộc**, lấy tại [cloud.cerebras.ai](https://cloud.cerebras.ai),
-  dùng để viết kịch bản (hook + lời bình).
-- Nếu dùng `vision_backend = "mistral"`: điền thêm `[api] mistral_api_key`,
-  lấy tại [console.mistral.ai](https://console.mistral.ai). Nếu để
-  `vision_backend = "local"` (mặc định) thì không cần key này, nhưng cần GPU.
-- `[tts] voice` — đổi nếu muốn giọng khác (mặc định tiếng Việt).
+```
+======================================================================
+  AI DIRECTOR VIDEO — PROJECT MANAGER
+======================================================================
+  1. Create new project
+  2. Continue existing project
+  3. List all projects
+  4. Delete a project
+  5. Sync project to cloud (Filebase)
+  6. Download project from cloud
+  7. Run pipeline on a project
+  0. Exit
+======================================================================
+```
 
-### Bước 4 — Tạo thư mục input/ và đặt video vào đúng chỗ
+---
 
-Đây là bước hay bị bỏ sót nhất, gây lỗi
-`FileNotFoundError: Không tìm thấy video đầu vào`:
+## Project Management
+
+### Creating a Project
+
+1. Select **1. Create new project**
+2. Enter a project ID (e.g., `my-movie-v1`)
+3. Enter video file path
+4. Enter project title
+
+Each project gets its own directory:
+```
+projects/
+  my-movie-v1/
+    _project_meta.json      # Project metadata
+    checkpoints/            # Pipeline checkpoints
+    output/
+      pipeline/            # Intermediate files
+      deliverables/        # Final video + subtitles
+```
+
+### Continuing a Project
+
+1. Select **2. Continue existing project**
+2. Choose from the list
+3. Pipeline resumes from last completed stage
+
+### Cloud Sync
+
+Projects are automatically synced to Filebase Storage. You can also:
+- **5. Sync project to cloud** — Manual upload
+- **6. Download project from cloud** — Download from another machine
+
+---
+
+## Features
+
+### Near Real-Time Checkpoints
+
+The pipeline saves checkpoints at multiple levels:
+- **Stage checkpoints** — After each major stage (preprocess, ASR, vision, etc.)
+- **Micro-checkpoints** — Within stages (per-scene in vision, per-clip in TTS/render)
+- **Emergency checkpoints** — On SIGINT/SIGTERM (Ctrl+C)
+
+Configure frequency in `config.toml`:
+```toml
+[processing]
+micro_checkpoint_interval = 1  # Save every item (most frequent)
+```
+
+### Filebase Cloud Storage
+
+All project data is synced to Filebase (S3-compatible storage):
+- Checkpoints sync automatically after each save
+- Full project upload/download for cross-machine workflow
+- Credentials stored in `config.toml` (not environment variables)
+
+### Smart Resume
+
+When you continue a project:
+1. Scans all checkpoints to determine current stage
+2. Skips completed stages automatically
+3. Resumes from exact point of interruption
+4. Works across different machines (with cloud sync)
+
+---
+
+## Configuration Reference
+
+### `[api]` — API Keys
+
+| Key | Description |
+|-----|-------------|
+| `cerebras_api_key` | Cerebras API key for script writing |
+| `cerebras_model` | Model name (default: `zai-glm-4.7`) |
+| `hf_token` | Hugging Face token (optional, for local vision) |
+| `mistral_api_key` | Mistral API key for vision analysis |
+
+### `[tts]` — Voice Settings
+
+| Key | Description | Default |
+|-----|-------------|---------|
+| `voice` | Edge-TTS voice name | `vi-VN-HoangMinhNeural` |
+| `rate` | Speech rate | `+0%` |
+| `volume` | Volume adjustment | `+0%` |
+| `pitch` | Pitch adjustment | `+0Hz` |
+
+**Available voices:**
+- Vietnamese: `vi-VN-HoangMinhNeural`, `vi-VN-NamMinhNeural`
+- English: `en-US-JennyNeural`, `en-US-GuyNeural`
+- Chinese: `zh-CN-XiaoxiaoNeural`, `zh-CN-YunxiNeural`
+
+### `[processing]` — Pipeline Settings
+
+| Key | Description | Default |
+|-----|-------------|---------|
+| `asr_model_size` | Whisper model size | `small` |
+| `vision_backend` | Vision analysis backend | `mistral` |
+| `micro_checkpoint_interval` | Checkpoint frequency | `1` |
+| `narration_pov` | Narration point of view | `third_person` |
+| `content_type` | Content type | `movie` |
+| `target_duration_sec` | Target output duration | `180` |
+
+### `[filebase]` — Cloud Storage
+
+| Key | Description | Default |
+|-----|-------------|---------|
+| `access_key` | Filebase access key | — |
+| `secret_key` | Filebase secret key | — |
+| `bucket_name` | Storage bucket name | `ai-director-video` |
+| `endpoint_url` | S3 endpoint URL | `https://s3.filebase.com` |
+| `enabled` | Enable cloud sync | `true` |
+
+### `[paths]` — File Paths
+
+| Key | Description | Default |
+|-----|-------------|---------|
+| `input_video` | Input video path | `./input/source.mp4` |
+| `output_dir` | Output directory | `./output` |
+| `checkpoint_dir` | Checkpoint directory | `./checkpoints` |
+| `projects_dir` | Projects directory | `./projects` |
+
+---
+
+## Command Line Usage
+
+### Interactive Mode (Default)
 
 ```bash
-mkdir -p input
-# copy hoặc upload video của bạn vào đây, đặt tên đúng khớp với
-# paths.input_video trong config.toml (mặc định là input/source.mp4)
-cp /đường/dẫn/video-cua-ban.mp4 input/source.mp4
+python run.py
 ```
 
-Kiểm tra lại trước khi chạy pipeline:
+Shows project menu for managing and running projects.
+
+### Non-Interactive Mode
 
 ```bash
-ls -la input/
-# phải thấy source.mp4 (hoặc tên file bạn đã khai trong paths.input_video)
+# Run directly without menu (uses default project)
+python run.py --no-menu
 ```
 
-Nếu muốn dùng tên/đường dẫn khác, sửa `paths.input_video` trong
-`config.toml` cho khớp — pipeline đọc đúng đường dẫn đó, không tự dò tìm
-file trong thư mục.
-
-> **Nếu lỡ quên bước này:** khi chạy `run.py` trong terminal/Colab cell
-> tương tác (có TTY), pipeline sẽ **hỏi lại đường dẫn video ngay tại chỗ**
-> thay vì dừng với lỗi — chỉ cần gõ đường dẫn đúng và Enter. Chỉ khi chạy
-> non-interactive (chạy nền, cron, CI — không có TTY để hỏi) thì mới báo
-> lỗi `FileNotFoundError` như cũ, vì lúc đó không có ai để trả lời prompt.
-
-### Bước 5 — (Tuỳ chọn) Tải trước model vision "local"
-
-Chỉ cần nếu bạn dùng `vision_backend = "local"` (Qwen3-VL-4B-Instruct) và
-muốn tải model trước thay vì để pipeline tự tải ở lần chạy đầu:
-
-```bash
-python3 -c "
-from pathlib import Path
-cache_dir = Path('./model_cache').resolve()
-cache_dir.mkdir(parents=True, exist_ok=True)
-
-from faster_whisper import WhisperModel
-WhisperModel('small', device='cpu', compute_type='int8', download_root=str(cache_dir))
-
-from transformers import AutoProcessor
-AutoProcessor.from_pretrained('Qwen/Qwen3-VL-4B-Instruct', cache_dir=str(cache_dir), trust_remote_code=True)
-"
+Or set in `config.toml`:
+```toml
+[project]
+show_project_menu_on_start = false
 ```
 
-> Nếu Hugging Face yêu cầu đăng nhập (model gated) hoặc bạn muốn tránh giới
-> hạn tốc độ tải, đặt token trước khi chạy lệnh trên:
-> ```bash
-> export HF_TOKEN=hf_xxxxxxxx          # Windows (PowerShell): $env:HF_TOKEN="hf_xxxxxxxx"
-> ```
->
-> Lệnh trên chỉ tải **processor** (nhẹ); **trọng số** Qwen3-VL-4B-Instruct
-> (~8-10GB) sẽ tự tải về `model_cache/` ngay lần đầu pipeline chạy tới bước
-> `vision.py` — không cần tải thủ công thêm, chỉ cần đủ dung lượng ổ đĩa và
-> mạng ổn định. Nếu dùng `vision_backend = "cerebras"` hoặc `"mistral"`
-> (qua API, không tải model về máy) thì **bỏ qua hẳn bước 5 này**.
+---
 
-### Google Colab
-
-Colab cần từng lệnh chạy trong cell riêng (không dùng `!python setup.py`
-nữa). Upload/giải nén project rồi chạy tuần tự các cell sau:
-
-```python
-%cd ai-director
-!apt-get update -qq && apt-get install -y -qq ffmpeg
-!pip install -q torch --index-url https://download.pytorch.org/whl/cu121  # Colab có GPU T4
-!pip install -q -r requirements.txt
-```
-
-```python
-# tạo config.toml từ mẫu rồi tự mở file trong panel bên trái để điền key,
-# hoặc ghi thẳng bằng Python nếu không muốn mở editor:
-!cp config.toml.example config.toml
-```
-
-```python
-# tạo input/ và upload video (hoặc mount Google Drive rồi copy từ đó)
-import os
-os.makedirs("input", exist_ok=True)
-from google.colab import files
-uploaded = files.upload()   # chọn video từ máy, sau đó đổi tên/copy vào input/source.mp4
-```
-
-```bash
-!mv "TÊN_FILE_VỪA_UPLOAD.mp4" input/source.mp4
-!ls -la input/    # xác nhận file đã ở đúng chỗ trước khi chạy pipeline
-```
-
-```bash
-!python run.py
-```
-
-> **Lưu ý Colab:** `!python run.py` chạy như 1 tiến trình con tách biệt,
-> không có TTY nên sẽ **không** hỏi lại đường dẫn video nếu thiếu — báo lỗi
-> `FileNotFoundError` ngay (đúng ý khi chạy nền, không bị treo chờ nhập).
-> Nếu muốn được hỏi lại đường dẫn ngay trong cell khi quên đặt video, dùng
-> `%run run.py` (IPython magic, chạy chung tiến trình với notebook nên
-> `input()` hoạt động được) thay vì `!python run.py`.
-
-### Kiểm tra nhanh trước khi chạy `run.py` (checklist)
-
-- [ ] `ffmpeg -version` và `ffprobe -version` chạy được, không lỗi "not found"
-- [ ] `pip show faster-whisper srt pydantic` không báo "not found" (packages đã cài)
-- [ ] `config.toml` tồn tại (không phải `config.toml.example`) và đã điền `cerebras_api_key`
-- [ ] `ls input/` thấy đúng file video, tên khớp với `paths.input_video` trong `config.toml`
-
-## Cấu hình
-
-Mọi tham số nằm trong `config.toml` (copy từ `config.toml.example`), gồm 4 section:
-
-- `[api]` — Cerebras API key/endpoint/model, HF token.
-- `[tts]` — giọng, tốc độ, âm lượng edge-tts.
-- `[processing]` — model ASR/vision, ngưỡng scene detection, thể loại/độ dài
-  narration, công thức tính thời lượng phụ đề. Riêng bước đọc ảnh scene
-  (`vision_backend`) có 3 lựa chọn độc lập với engine viết kịch bản
-  (script_writer.py vẫn luôn dùng Cerebras/GLM): `"local"` (Qwen3-VL-4B, cần
-  GPU khoẻ), `"cerebras"` (Gemma 4 31B qua Cerebras, free tier rất hạn chế),
-  `"mistral"` (model multimodal của Mistral qua `mistral_api_key` riêng trong
-  `[api]` — khuyến nghị cho máy không GPU hoặc muốn tránh giới hạn của
-  Cerebras).
-- `[paths]` — đường dẫn video đầu vào, thư mục output/checkpoint/model cache.
-
-Không dùng `.env` / `os.getenv()` ở bất kỳ đâu trong code — mọi cấu hình đọc
-qua `config.py`.
-
-## Chạy pipeline
-
-1. Đặt video nguồn vào đường dẫn đã khai trong `config.toml` (mặc định
-   `./input/source.mp4` — tự tạo thư mục `input/` nếu chưa có, hoặc đổi
-   `paths.input_video` sang đường dẫn khác).
-2. Chạy:
-
-```bash
-python3 run.py     # Linux/macOS
-python run.py       # Windows
-```
-
-Pipeline chạy tuần tự: **preprocess → ASR → vision → semantic graph → script
-(narration + storyboard) → TTS → render**, checkpoint sau mỗi bước vào
-`./checkpoints/`. Nếu tiến trình bị ngắt giữa chừng, chạy lại đúng lệnh trên —
-pipeline tự resume từ bước gần nhất, không chạy lại từ đầu.
-
-## Kết quả
+## File Structure
 
 ```
-output/
-  pipeline/            ← sản phẩm trung gian để debug (asr_timeline.json,
-                          vision_analysis.json, semantic_blocks.json,
-                          storyboard.json, voiceover.mp3, keyframes/...)
-  deliverables/
-    final_preview.mp4   ← video hoàn chỉnh
-    narration_subtitle.srt
+AI-Director-Video/
+├── run.py                    # Main entry point
+├── config.toml               # Configuration (your API keys)
+├── config.toml.example       # Example configuration
+├── requirements.txt          # Python dependencies
+│
+├── checkpoint.py             # Enhanced checkpoint system
+├── filebase_storage.py       # Filebase cloud storage
+├── project_manager.py        # Project management
+│
+├── preprocess.py             # Video preprocessing
+├── asr.py                    # Speech-to-text
+├── vision.py                 # Visual analysis
+├── semantic_graph.py         # Data combination
+├── script_writer.py          # Narration generation
+├── tts.py                    # Text-to-speech
+├── render.py                 # Video rendering
+│
+├── config.py                 # Config loader
+├── platform_utils.py         # Platform utilities
+├── progress_utils.py         # Progress tracking
+│
+├── projects/                 # Project directories
+│   └── <project-id>/
+│       ├── _project_meta.json
+│       ├── checkpoints/
+│       └── output/
+│
+├── input/                    # Input videos
+├── output/                   # Default output
+├── checkpoints/              # Default checkpoints
+└── model_cache/              # Downloaded AI models
 ```
 
-## Checkpoint / resume
+---
 
-```python
-from checkpoint import CheckpointManager
-ckpt = CheckpointManager("./checkpoints")
-ckpt.clear("script")   # xoá checkpoint để chạy lại riêng bước viết kịch bản
-ckpt.clear()           # xoá toàn bộ, chạy lại từ đầu
-```
+## Troubleshooting
 
-## Giới hạn / điều cần biết
+### "No such file or directory" for video
+- Check `paths.input_video` in `config.toml`
+- Or enter video path when prompted
 
-- **Cerebras model**: tên model trong `[api] cerebras_model` có thể thay đổi
-  theo thời gian trên Cerebras Inference Cloud — sửa trong `config.toml` nếu
-  cần.
-- **Qwen3-VL-4B-Instruct** cần tải ~8-10GB trọng số lần đầu chạy stage vision;
-  chạy được ở `float16` trên GPU 15GB VRAM trở lên (T4 free tier của Colab
-  chạy được nhưng có thể chậm).
-- Trên **Apple Silicon (M1/M2/M3...)**, `vision_device`/`asr_device = "auto"`
-  sẽ ưu tiên CUDA → MPS → CPU; riêng `faster-whisper` (CTranslate2) chưa hỗ
-  trợ MPS nên tự động chạy CPU.
-- Các bước tương tác (chọn hook mở đầu, xác nhận storyboard) không bắt buộc
-  dừng lại chờ người dùng nếu chạy non-interactive (ví dụ chạy nền, CI) — nếu
-  muốn luôn dừng lại xác nhận, chạy `run.py` trong terminal/cell tương tác
-  bình thường.
-- Không tự sinh BGM/cover — người dùng tự hoàn thiện trong CapCut/Premiere
-  nếu cần.
+### Filebase sync fails
+- Check `access_key` and `secret_key` in `[filebase]`
+- Ensure bucket name is correct
+- Pipeline continues locally even if cloud sync fails
 
-## Nguồn gốc & khác biệt
+### Checkpoint not found
+- Delete the corrupted checkpoint: `rm checkpoints/<stage>.json`
+- Or create fresh project and re-run
 
-Repo skill gốc `ai-director-video-commentary` không phải là chương trình
-Python — đó là một **skill cho Claude Code** (`skill.md` + `references/*.md`),
-tức tài liệu hướng dẫn để Claude Code (agent) tự thực hiện từng bước bằng tay
-(gọi ffmpeg, đọc frame, viết kịch bản bằng model built-in...). Repo gốc không
-có `main.py`, không có module gọi DashScope, không có module TTS.
+### Out of memory (CUDA)
+- Reduce `vision_batch_size` in config
+- Use `vision_backend = "mistral"` instead of `"local"`
+- Use smaller `asr_model_size`
 
-Bản này viết lại toàn bộ thành code Python độc lập, bám sát schema/thuật toán
-mô tả trong `references/*.md` (Video Semantic Graph, Storyboard, công thức
-tính thời lượng phụ đề, thuật toán render...), với 4 điểm khác biệt:
+---
 
-| Thành phần | Repo gốc (thiết kế cho Claude Code) | Bản này |
-|---|---|---|
-| Cấu hình | không có (giả định do agent tự hỏi) | `config.toml` (`tomllib`/`tomli`) |
-| Vision analysis | Qwen3-VL-Plus qua DashScope API | Qwen3-VL-4B-Instruct local qua `transformers` |
-| Viết kịch bản | Claude built-in (không cần API) | LLM qua Cerebras API (OpenAI-compatible) |
-| TTS | không có (để trống, dùng CapCut) | `edge-tts`, xuất `voiceover.mp3` |
+## API Keys Setup
 
-Các file `ref-*.md`/`ref-*.json`/`ref-*.srt` được giữ lại làm tài liệu mô tả
-schema mà code Python đã hiện thực hoá — không còn là "spec cho agent" nữa.
+### Cerebras (for script writing)
+1. Sign up at https://cerebras.ai
+2. Get API key from dashboard
+3. Add to `config.toml`: `cerebras_api_key = "your-key"`
+
+### Mistral (for vision analysis)
+1. Sign up at https://mistral.ai
+2. Get API key from dashboard
+3. Add to `config.toml`: `mistral_api_key = "your-key"`
+
+### Filebase (for cloud storage)
+1. Access key and secret key are pre-configured
+2. Set `filebase.enabled = true` to use cloud sync
+3. Bucket: `ai-director-video`
+
+---
+
+## Tips
+
+1. **Start simple** — Use short videos (1-3 minutes) first
+2. **Check checkpoints** — View `checkpoints/` folder to see progress
+3. **Use cloud sync** — Sync important projects to continue on another machine
+4. **Customize voice** — Try different TTS voices in config
+5. **Adjust duration** — Set `target_duration_sec` for desired output length
+
+---
+
+## License
+
+This project is provided as-is for educational and personal use.
