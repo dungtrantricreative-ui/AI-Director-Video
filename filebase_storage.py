@@ -32,6 +32,49 @@ except ImportError:
         pass  # fallback im lặng nếu progress_utils không có sẵn (không nên xảy ra trong project này)
 
 
+# File có kích thước >= ngưỡng này (video gốc, checkpoint model...) được coi
+# là "nặng": tải RIÊNG (không xen vào ThreadPoolExecutor của các file nhỏ)
+# và có dòng tiến độ RIÊNG tính theo byte thật, thay vì lẫn vào thanh đếm
+# số file — trước đây 1 file 1.3GB cũng chỉ tính là "+1" như 1 file keyframe
+# vài chục KB, nên thanh đếm file gần như đứng im ở vòng lặp cuối dù vẫn
+# đang tải, nhìn như bị treo.
+HEAVY_FILE_THRESHOLD_BYTES = 20 * 1024 * 1024  # 20MB
+
+
+def _format_size(n: float) -> str:
+    """Định dạng số byte thành chuỗi dễ đọc (KB/MB/GB)."""
+    size = float(n)
+    for unit in ("B", "KB", "MB"):
+        if size < 1024:
+            return f"{size:.1f}{unit}"
+        size /= 1024
+    return f"{size:.1f}GB"
+
+
+class _ByteProgress:
+    """Callback cho boto3 download_file/upload_file dùng cho 1 file nặng:
+    in tiến độ theo byte thật (MB đã tải/tổng MB) trên dòng log riêng, có
+    tên file để phân biệt với thanh đếm file của các file nhỏ chạy song song."""
+
+    def __init__(self, label: str, total_bytes: int):
+        self.label = label
+        self.total_bytes = max(total_bytes, 1)  # tránh chia cho 0 nếu size=0
+        self.seen = 0
+        self.start = time.time()
+
+    def __call__(self, bytes_amount: int) -> None:
+        # boto3 gọi lại nhiều lần với số byte MỚI nhận mỗi lần (không phải
+        # tổng luỹ kế), nên phải cộng dồn ở đây.
+        self.seen += bytes_amount
+        elapsed = time.time() - self.start
+        speed = self.seen / elapsed if elapsed > 0 else 0
+        print_progress_bar(
+            self.seen, self.total_bytes,
+            prefix=f"[filebase] {self.label}",
+            suffix=f"{_format_size(self.seen)}/{_format_size(self.total_bytes)}, {_format_size(speed)}/s",
+        )
+
+
 class FilebaseStorage:
     """Quản lý upload/download dữ liệu project lên/từ Filebase qua S3 API."""
 
@@ -162,14 +205,17 @@ class FilebaseStorage:
             print(f"[filebase] Không bật được CORS (dashboard web có thể không đọc được status.json): {e}")
             return False
 
-    def _download_file(self, remote_key: str, local_path: Path) -> bool:
-        """Tải 1 file từ Filebase về."""
+    def _download_file(self, remote_key: str, local_path: Path, callback=None) -> bool:
+        """Tải 1 file từ Filebase về. `callback`, nếu có, được boto3 gọi lại
+        nhiều lần trong lúc tải với số byte MỚI nhận (không phải luỹ kế) —
+        dùng cho file nặng để in tiến độ theo byte thật (xem download_project)."""
         try:
             local_path.parent.mkdir(parents=True, exist_ok=True)
             self.client.download_file(
                 self.bucket_name,
                 remote_key,
                 str(local_path),
+                Callback=callback,
             )
             return True
         except Exception as e:
@@ -178,12 +224,20 @@ class FilebaseStorage:
 
     def _list_files(self, prefix: str) -> list[str]:
         """Liệt kê tất cả file dưới 1 prefix (thư mục) trên Filebase."""
+        return [key for key, _size in self._list_files_with_size(prefix)]
+
+    def _list_files_with_size(self, prefix: str) -> list[tuple[str, int]]:
+        """Liệt kê tất cả file dưới 1 prefix, kèm kích thước (byte).
+
+        list_objects_v2 đã trả sẵn "Size" cho mỗi object trong response nên
+        không cần gọi head_object riêng cho từng file (đỡ tốn round-trip) —
+        dùng để phân loại file nhỏ/nặng trước khi tải ở download_project()."""
         try:
             files = []
             paginator = self.client.get_paginator("list_objects_v2")
             for page in paginator.paginate(Bucket=self.bucket_name, Prefix=prefix):
                 for obj in page.get("Contents", []):
-                    files.append(obj["Key"])
+                    files.append((obj["Key"], obj.get("Size", 0)))
             return files
         except Exception as e:
             print(f"[filebase] Lỗi liệt kê {prefix}: {e}")
@@ -304,59 +358,85 @@ class FilebaseStorage:
     def download_project(self, project_id: str, local_dir: Path, max_workers: int = 16) -> bool:
         """Tải 1 project từ Filebase về thư mục cục bộ (bao gồm input/video).
 
-        Tải SONG SONG (ThreadPoolExecutor) thay vì tuần tự từng file một.
-        Lý do: project thường có hàng ngàn file NHỎ (keyframe .jpg trích ra
-        từ preprocess, 3 file/scene) — với overhead ký request + bắt tay TLS
-        cỡ vài trăm ms/request, tải tuần tự 1 file/lần khiến tổng thời gian
-        bị CHẶN BỞI ĐỘ TRỄ (latency-bound) chứ không phải bởi băng thông
-        (bandwidth-bound), dù mỗi file tự nó tải rất nhanh. Tải song song
-        16 luồng giấu bớt độ trễ đó, giảm tổng thời gian gần theo tỉ lệ số
-        luồng (tất nhiên vẫn giới hạn bởi băng thông thật của kết nối)."""
+        Tách làm 2 nhóm:
+          - File NHỎ (< HEAVY_FILE_THRESHOLD_BYTES, VD: keyframe .jpg): tải
+            SONG SONG bằng ThreadPoolExecutor như cũ, thanh tiến độ đếm theo
+            SỐ FILE — hợp lý vì có hàng ngàn file, mỗi file tải rất nhanh,
+            nút thắt là ĐỘ TRỄ mạng chứ không phải băng thông.
+          - File NẶNG (video gốc, checkpoint model...): tải TUẦN TỰ, SAU khi
+            nhóm file nhỏ xong, mỗi file có dòng tiến độ RIÊNG tính theo BYTE
+            THẬT (MB đã tải/tổng MB). Trước đây file nặng bị trộn chung vào
+            thanh đếm file: 1 file 1.3GB cũng chỉ tính "+1" như 1 keyframe vài
+            chục KB, nên khi tới file cuối, thanh gần như đứng im ở mốc
+            (total-1)/total trong lúc file đó vẫn đang tải thật — nhìn như bị
+            treo. Tải tuần tự (không xen với pool file nhỏ) để tránh 2 dòng
+            tiến độ \\r ghi đè lẫn nhau trên cùng 1 dòng terminal."""
         if not self.bucket_ready:
             print(f"[filebase] Không tải được: bucket '{self.bucket_name}' chưa sẵn sàng.")
             return False
         remote_prefix = f"projects/{project_id}/"
-        files = self._list_files(remote_prefix)
+        files = self._list_files_with_size(remote_prefix)
         if not files:
             print(f"[filebase] Không tìm thấy project '{project_id}'.")
             return False
 
         local_dir.mkdir(parents=True, exist_ok=True)
-        to_download = []
-        for remote_key in files:
+        small_files: list[tuple[str, Path]] = []
+        heavy_files: list[tuple[str, Path, int]] = []
+        for remote_key, size in files:
             if remote_key.endswith("/"):
                 continue
             rel = remote_key[len(remote_prefix):]
             if not rel or rel.startswith("_"):
                 continue
-            to_download.append((remote_key, local_dir / rel))
+            local_file = local_dir / rel
+            if size >= HEAVY_FILE_THRESHOLD_BYTES:
+                heavy_files.append((remote_key, local_file, size))
+            else:
+                small_files.append((remote_key, local_file))
 
-        total = len(to_download)
+        total = len(small_files) + len(heavy_files)
         downloaded = 0
         failed: list[str] = []
         lock = threading.Lock()
         start = time.time()
 
-        print_progress_bar(0, total, prefix="[filebase] download", suffix=f"0/{total} file")
+        # --- Nhóm 1: file nhỏ, tải song song, tiến độ theo số file ---
+        if small_files:
+            print_progress_bar(0, len(small_files), prefix="[filebase] download",
+                                suffix=f"0/{len(small_files)} file nhỏ")
 
-        def _job(remote_key: str, local_file: Path) -> tuple[str, bool]:
-            ok = self._download_file(remote_key, local_file)
-            return remote_key, ok
+            def _job(remote_key: str, local_file: Path) -> tuple[str, bool]:
+                ok = self._download_file(remote_key, local_file)
+                return remote_key, ok
 
-        with ThreadPoolExecutor(max_workers=max_workers) as pool:
-            futures = [pool.submit(_job, rk, lf) for rk, lf in to_download]
-            for future in as_completed(futures):
-                remote_key, ok = future.result()
-                with lock:
-                    downloaded += 1
-                    if not ok:
-                        failed.append(remote_key)
-                    elapsed = time.time() - start
-                    speed = downloaded / elapsed if elapsed > 0 else 0
-                    print_progress_bar(
-                        downloaded, total, prefix="[filebase] download",
-                        suffix=f"{downloaded}/{total} file, {speed:.1f} file/s",
-                    )
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                futures = [pool.submit(_job, rk, lf) for rk, lf in small_files]
+                done_small = 0
+                for future in as_completed(futures):
+                    remote_key, ok = future.result()
+                    with lock:
+                        done_small += 1
+                        downloaded += 1
+                        if not ok:
+                            failed.append(remote_key)
+                        elapsed = time.time() - start
+                        speed = done_small / elapsed if elapsed > 0 else 0
+                        print_progress_bar(
+                            done_small, len(small_files), prefix="[filebase] download",
+                            suffix=f"{done_small}/{len(small_files)} file nhỏ, {speed:.1f} file/s",
+                        )
+
+        # --- Nhóm 2: file nặng, tải tuần tự, tiến độ theo byte thật ---
+        for i, (remote_key, local_file, size) in enumerate(heavy_files, start=1):
+            label = f"download nặng ({i}/{len(heavy_files)}) {local_file.name}"
+            print(f"[filebase] Bắt đầu tải file nặng: {local_file.name} ({_format_size(size)})")
+            progress_cb = _ByteProgress(label, size)
+            ok = self._download_file(remote_key, local_file, callback=progress_cb)
+            with lock:
+                downloaded += 1
+                if not ok:
+                    failed.append(remote_key)
 
         elapsed = time.time() - start
         print(f"[filebase] Đã tải {downloaded - len(failed)}/{total} file về {local_dir} "
