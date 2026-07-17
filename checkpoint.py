@@ -3,12 +3,11 @@ checkpoint.py — Enhanced checkpoint system with near real-time frequency.
 
 Every significant operation now creates a checkpoint, allowing resume from
 almost any point in the pipeline. Checkpoints are automatically synced to
-Filebase when configured.
+cloud storage (Tigris, or any other S3-compatible provider) when configured.
 
 Changes from original:
   - Micro-checkpoints within stages (every scene, every batch)
-  - Auto-save on SIGINT/SIGTERM
-  - Filebase sync after each checkpoint
+  - Cloud sync after each checkpoint
   - Project-aware checkpointing
 """
 
@@ -26,19 +25,26 @@ from typing import Any
 class CheckpointManager:
     """Enhanced checkpoint manager with micro-checkpoints and cloud sync."""
 
-    def __init__(self, checkpoint_dir: str | Path, project_id: str = "", filebase_storage=None,
-                 auto_sync_cloud: bool = True):
+    def __init__(self, checkpoint_dir: str | Path, project_id: str = "", cloud_storage=None,
+                 auto_sync_cloud: bool = True, auto_save_interval: int = 0):
         self.dir = Path(checkpoint_dir)
         self.dir.mkdir(parents=True, exist_ok=True)
         self.project_id = project_id
-        self.filebase = filebase_storage
+        self.cloud = cloud_storage
         # auto_sync_cloud: đọc từ config processing.auto_sync_cloud. Nếu False,
-        # KHÔNG tự động sync checkpoint lên Filebase sau mỗi lần lưu (người
+        # KHÔNG tự động sync checkpoint lên cloud sau mỗi lần lưu (người
         # dùng có thể vẫn chủ động sync tay qua menu "5. Đồng bộ lên cloud").
         self.auto_sync_cloud = auto_sync_cloud
+        # auto_save_interval: đọc từ project.auto_save_interval trong config.toml
+        # (giây). 0 (mặc định) = giữ nguyên hành vi cũ: throttle sync
+        # micro-checkpoint lên cloud theo SỐ LẦN gọi (mỗi 5 lần, xem
+        # save_micro). Nếu > 0, chuyển throttle sang theo THỜI GIAN: sync mỗi
+        # khi đã trôi qua ít nhất auto_save_interval giây kể từ lần sync gần
+        # nhất, bất kể số lần save_micro() đã gọi.
+        self.auto_save_interval = max(0, auto_save_interval)
         self._save_count = 0
         # Đếm riêng số lần save_micro() được gọi, dùng để throttle sync lên
-        # Filebase (KHÔNG dùng chung _save_count — biến đó chỉ tăng trong
+        # cloud (KHÔNG dùng chung _save_count — biến đó chỉ tăng trong
         # save(), thường gọi 1 lần/stage nên gần như luôn = 0 -> throttle
         # bằng _save_count sẽ vô tình sync MỌI micro-checkpoint, ngược ý định
         # "mỗi 5 lần" ghi trong docstring).
@@ -147,29 +153,22 @@ class CheckpointManager:
             json.dump(wrapper, f, ensure_ascii=False, indent=2)
         tmp.replace(p)
 
-        # Chỉ sync micro-checkpoint lên cloud mỗi 5 lần để tránh spam API.
-        # Dùng bộ đếm riêng (_micro_save_count) vì _save_count chỉ tăng trong
-        # save(), không phản ánh số lần save_micro() thực sự được gọi.
+        # Throttle sync micro-checkpoint lên cloud để tránh spam API:
+        # - Nếu auto_save_interval > 0 (project.auto_save_interval trong
+        #   config.toml): sync theo THỜI GIAN, mỗi khi đã trôi qua ít nhất
+        #   auto_save_interval giây kể từ lần sync micro gần nhất.
+        # - Ngược lại (mặc định 0): giữ hành vi cũ, sync mỗi 5 lần gọi
+        #   save_micro() (dùng bộ đếm riêng _micro_save_count vì _save_count
+        #   chỉ tăng trong save(), không phản ánh số lần save_micro() thực sự
+        #   được gọi).
         self._micro_save_count += 1
-        if self._micro_save_count % 5 == 0:
+        if self.auto_save_interval > 0:
+            should_sync = (time.time() - self._last_save_time) >= self.auto_save_interval
+        else:
+            should_sync = self._micro_save_count % 5 == 0
+        if should_sync:
             self._sync_to_cloud(p, f"checkpoints/{stage}_{item_id}.json")
-
-    def save_partial(self, stage: str, data_list: list, current_idx: int, total: int) -> None:
-        """Save partial progress for a stage (useful for long loops)."""
-        wrapper = {
-            "_done": False,
-            "_stage": stage,
-            "_partial": True,
-            "_current_idx": current_idx,
-            "_total": total,
-            "_saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "data": data_list,
-        }
-        p = self._path(f"{stage}_partial")
-        tmp = p.with_suffix(".json.tmp")
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(wrapper, f, ensure_ascii=False, indent=2)
-        tmp.replace(p)
+            self._last_save_time = time.time()
 
     def load(self, stage: str) -> Any:
         """Load stage checkpoint data."""
@@ -184,18 +183,6 @@ class CheckpointManager:
         with open(p, "r", encoding="utf-8") as f:
             wrapper = json.load(f)
         return wrapper["data"]
-
-    def load_partial(self, stage: str) -> tuple[list, int, int] | None:
-        """Load partial progress. Returns (data_list, current_idx, total) or None."""
-        p = self._path(f"{stage}_partial")
-        if not p.exists():
-            return None
-        try:
-            with open(p, "r", encoding="utf-8") as f:
-                wrapper = json.load(f)
-            return wrapper.get("data", []), wrapper.get("_current_idx", 0), wrapper.get("_total", 0)
-        except (json.JSONDecodeError, OSError):
-            return None
 
     def clear(self, stage: str | None = None) -> None:
         """Clear checkpoint(s)."""
@@ -233,22 +220,22 @@ class CheckpointManager:
         print("[checkpoint] Emergency checkpoint saved.")
 
     def _sync_to_cloud(self, local_path: Path, remote_relative: str) -> None:
-        """Sync a single file to Filebase Storage."""
-        if self.filebase is None or not self.auto_sync_cloud:
+        """Sync a single file to cloud storage."""
+        if self.cloud is None or not self.auto_sync_cloud:
             return
         try:
             remote_key = f"projects/{self.project_id}/{remote_relative}"
-            self.filebase._upload_file(local_path, remote_key)
+            self.cloud._upload_file(local_path, remote_key)
         except Exception:
             # Don't crash pipeline on cloud sync failure
             pass
 
     def sync_all_to_cloud(self, force: bool = False) -> dict[str, int]:
-        """Sync all checkpoint files to Filebase Storage.
+        """Sync all checkpoint files to cloud storage.
 
         force=True bỏ qua cờ auto_sync_cloud (dùng khi người dùng chủ động
         bấm "đồng bộ" từ menu, chứ không phải auto-sync ngầm)."""
-        if self.filebase is None:
+        if self.cloud is None:
             return {"uploaded": 0, "errors": 0}
         if not self.auto_sync_cloud and not force:
             return {"uploaded": 0, "errors": 0}
@@ -257,7 +244,7 @@ class CheckpointManager:
         errors = 0
         for p in self.dir.glob("*.json"):
             remote_key = f"projects/{self.project_id}/checkpoints/{p.name}"
-            ok = self.filebase._upload_file(p, remote_key)
+            ok = self.cloud._upload_file(p, remote_key)
             if ok:
                 uploaded += 1
             else:

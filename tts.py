@@ -109,7 +109,13 @@ def mix_voiceover_track(
     Dùng ffmpeg `amix`/`adelay` filter.
     """
     timeline = storyboard["timeline"]
-    total_dur = timeline[-1]["output"]["end"] if timeline else 0.0
+    if not timeline:
+        raise ValueError(
+            "mix_voiceover_track: storyboard rỗng (timeline không có câu narration nào). "
+            "Có thể do toàn bộ câu bị lọc bỏ ở stage trước (không còn scene_id hợp lệ nào) — "
+            "kiểm tra lại output của stage 'script'/'storyboard' trước khi chạy TTS."
+        )
+    total_dur = timeline[-1]["output"]["end"]
 
     inputs = []
     filter_parts = []
@@ -142,6 +148,12 @@ def run_tts(cfg, storyboard: dict[str, Any], checkpoint_mgr=None) -> dict[str, A
     pipeline_dir = output_dir / "pipeline"
     tts_dir = pipeline_dir / "tts_clips"
     pipeline_dir.mkdir(parents=True, exist_ok=True)
+
+    engine = cfg.get("tts.engine", "edge-tts")
+    if engine != "edge-tts":
+        print(f"[tts] CẢNH BÁO: tts.engine = '{engine}' trong config.toml, nhưng hiện tại "
+              f"chỉ có engine 'edge-tts' được cài đặt thật sự — vẫn dùng edge-tts, "
+              f"giá trị '{engine}' không có tác dụng.")
 
     voice = cfg.get("tts.voice", "vi-VN-HoangMinhNeural")
     rate = cfg.get("tts.rate", "+0%")

@@ -484,7 +484,6 @@ def run_vision_analysis(cfg, preprocess_result: dict[str, Any], checkpoint_mgr=N
     keyframes = preprocess_result["keyframes"]
 
     total_scenes = len(scenes)
-    micro_interval = cfg.get("processing.micro_checkpoint_interval", 1)
 
     # --- Resume: tải các scene đã có micro-checkpoint từ lần chạy trước ---
     # Mỗi scene được checkpoint RIÊNG LẺ (key = scene_id), nên ta có thể biết
@@ -557,7 +556,14 @@ def run_vision_analysis(cfg, preprocess_result: dict[str, Any], checkpoint_mgr=N
                         prefix="[vision] analyzing",
                         suffix=f"{scene_id} ({len(frame_paths)} frames)",
                     )
-                    if checkpoint_mgr is not None and scene_idx % micro_interval == 0:
+                    # LUÔN lưu checkpoint ngay sau mỗi scene (không throttle theo
+                    # micro_interval) — giống nhánh batch ở trên: mỗi scene ở đây
+                    # đã tốn tiền/quota gọi API backend (Cerebras/Mistral), nên nếu
+                    # throttle và pipeline bị ngắt giữa chừng, các scene đã gọi API
+                    # xong nhưng chưa tới mốc lưu sẽ mất trắng và phải tốn API gọi
+                    # lại. Việc throttle tần suất SYNC LÊN CLOUD đã được xử lý
+                    # riêng trong CheckpointManager.save_micro().
+                    if checkpoint_mgr is not None:
                         checkpoint_mgr.save_micro("vision", scene_id, analysis)
         finally:
             analyzer.unload()

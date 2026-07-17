@@ -1,6 +1,6 @@
 # AI Director Video Commentary — Enhanced Version
 
-An AI-powered video commentary pipeline that automatically generates narrated commentary videos from any input video. Features project management, Filebase cloud sync, and near real-time checkpointing.
+An AI-powered video commentary pipeline that automatically generates narrated commentary videos from any input video. Features project management, cloud sync (Tigris, S3-compatible), and near real-time checkpointing.
 
 ## What This Does
 
@@ -35,11 +35,13 @@ Edit `config.toml` with your API keys:
 cerebras_api_key = "your-cerebras-key"
 mistral_api_key = "your-mistral-key"
 
-[filebase]
-access_key = "38A62F3FFC1655CB3EBB"
-secret_key = "qZou610B8wxpPm29gk6iXbfu82RqdInGQ3lgQtT3"
+[cloud]
+access_key = "your-tigris-access-key"
+secret_key = "your-tigris-secret-key"
 bucket_name = "ai-director-video"
-endpoint_url = "https://s3.filebase.com"
+endpoint_url = "https://t3.storage.dev"
+region_name = "auto"
+addressing_style = "virtual"
 enabled = true
 ```
 
@@ -59,7 +61,7 @@ You'll see the project management menu:
   2. Continue existing project
   3. List all projects
   4. Delete a project
-  5. Sync project to cloud (Filebase)
+  5. Sync project to cloud (Tigris)
   6. Download project from cloud
   7. Run pipeline on a project
   0. Exit
@@ -96,7 +98,7 @@ projects/
 
 ### Cloud Sync
 
-Projects are automatically synced to Filebase Storage. You can also:
+Projects are automatically synced to cloud storage. You can also:
 - **5. Sync project to cloud** — Manual upload
 - **6. Download project from cloud** — Download from another machine
 
@@ -117,9 +119,9 @@ Configure frequency in `config.toml`:
 micro_checkpoint_interval = 1  # Save every item (most frequent)
 ```
 
-### Filebase Cloud Storage
+### Cloud Storage (Tigris)
 
-All project data is synced to Filebase (S3-compatible storage):
+All project data is synced to Tigris, or any other S3-compatible storage provider:
 - Checkpoints sync automatically after each save
 - Full project upload/download for cross-machine workflow
 - Credentials stored in `config.toml` (not environment variables)
@@ -170,14 +172,16 @@ When you continue a project:
 | `content_type` | Content type | `movie` |
 | `target_duration_sec` | Target output duration | `180` |
 
-### `[filebase]` — Cloud Storage
+### `[cloud]` — Cloud Storage
 
 | Key | Description | Default |
 |-----|-------------|---------|
-| `access_key` | Filebase access key | — |
-| `secret_key` | Filebase secret key | — |
+| `access_key` | Cloud storage access key | — |
+| `secret_key` | Cloud storage secret key | — |
 | `bucket_name` | Storage bucket name | `ai-director-video` |
-| `endpoint_url` | S3 endpoint URL | `https://s3.filebase.com` |
+| `endpoint_url` | S3 endpoint URL | `https://t3.storage.dev` (Tigris) |
+| `region_name` | Region (`auto` for Tigris) | `auto` |
+| `addressing_style` | `path` or `virtual` (Tigris requires `virtual`) | `virtual` |
 | `enabled` | Enable cloud sync | `true` |
 
 ### `[paths]` — File Paths
@@ -226,7 +230,7 @@ AI-Director-Video/
 ├── requirements.txt          # Python dependencies
 │
 ├── checkpoint.py             # Enhanced checkpoint system
-├── filebase_storage.py       # Filebase cloud storage
+├── cloud_storage.py          # Cloud storage (Tigris / S3-compatible)
 ├── project_manager.py        # Project management
 │
 ├── preprocess.py             # Video preprocessing
@@ -261,9 +265,9 @@ AI-Director-Video/
 - Check `paths.input_video` in `config.toml`
 - Or enter video path when prompted
 
-### Filebase sync fails
-- Check `access_key` and `secret_key` in `[filebase]`
-- Ensure bucket name is correct
+### Cloud sync fails
+- Check `access_key` and `secret_key` in `[cloud]`
+- Ensure bucket name is correct and, for Tigris, that `region_name = "auto"` and `addressing_style = "virtual"`
 - Pipeline continues locally even if cloud sync fails
 
 ### Checkpoint not found
@@ -289,10 +293,10 @@ AI-Director-Video/
 2. Get API key from dashboard
 3. Add to `config.toml`: `mistral_api_key = "your-key"`
 
-### Filebase (for cloud storage)
-1. Access key and secret key are pre-configured
-2. Set `filebase.enabled = true` to use cloud sync
-3. Bucket: `ai-director-video`
+### Tigris (for cloud storage)
+1. Sign up at https://www.tigrisdata.com and create an access key + bucket
+2. Fill in `[cloud]` in `config.toml` with the access key, secret key, and bucket name
+3. Set `cloud.enabled = true` to use cloud sync (endpoint/region/addressing_style already default to Tigris)
 
 ---
 

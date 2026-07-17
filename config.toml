@@ -89,7 +89,7 @@ max_speed_ratio = 4.0
 # micro_checkpoint_interval: save checkpoint every N items (scenes/batches)
 # Lower = more frequent (near real-time). Default: 1 = every item.
 micro_checkpoint_interval = 1
-# auto_sync_cloud: auto sync to Filebase after each checkpoint
+# auto_sync_cloud: auto sync to cloud storage (Tigris) after each checkpoint
 auto_sync_cloud = true
 
 [paths]
@@ -100,10 +100,11 @@ model_cache_dir = "./model_cache"
 # projects_dir: where all projects are stored
 projects_dir = "./projects"
 
-[filebase]
-# Đã chuyển từ Filebase sang Tigris (https://www.tigrisdata.com) — mục vẫn
-# tên "[filebase]" vì code (filebase_storage.py) dùng chung logic cho mọi
-# provider tương thích S3, chỉ đổi giá trị bên dưới là đủ.
+[cloud]
+# Đang dùng Tigris (https://www.tigrisdata.com). Mục này (và code trong
+# cloud_storage.py) hoàn toàn generic cho mọi provider tương thích S3 —
+# chỉ cần đổi giá trị bên dưới là dùng được provider khác (Filebase, AWS S3,
+# Cloudflare R2, ...), không cần sửa code.
 # Access key (Tigris)
 access_key = "tid_cedowsuKxoNrEXDkqMUbbWzzLrESkAoMtYsigaRjwAuEQ_jKka"
 # Secret key (Tigris)

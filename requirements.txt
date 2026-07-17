@@ -1,4 +1,4 @@
-# AI Director Video Commentary — Enhanced with Project Management & Filebase
+# AI Director Video Commentary — Enhanced with Project Management & Cloud Sync (Tigris)
 # Runs on Colab, Linux, macOS, Windows.
 # Config from config.toml (tomllib/tomli).
 
@@ -34,5 +34,5 @@ pydantic>=2.12.0
 srt>=3.5.3
 numpy>=1.26.0
 
-# --- Filebase / Cloud storage (S3-compatible) ---
+# --- Cloud storage (Tigris, or any other S3-compatible provider) ---
 boto3>=1.34.0

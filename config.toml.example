@@ -79,7 +79,7 @@ max_speed_ratio = 4.0              # source_duration / output_duration tối đa
 # micro_checkpoint_interval: lưu checkpoint mỗi N item (scene/batch)
 # Càng thấp = càng gần real-time. Mặc định: 1 = mỗi item.
 micro_checkpoint_interval = 1
-# auto_sync_cloud: tự động sync lên Filebase sau mỗi checkpoint
+# auto_sync_cloud: tự động sync lên cloud (Tigris) sau mỗi checkpoint
 auto_sync_cloud = true
 
 [paths]
@@ -90,11 +90,11 @@ model_cache_dir = "./model_cache"
 # projects_dir: nơi lưu toàn bộ project
 projects_dir = "./projects"
 
-[filebase]
-# Thông tin xác thực lưu trữ cloud (tương thích S3) — mục vẫn tên "[filebase]"
-# vì lý do lịch sử, nhưng dùng được với bất kỳ provider tương thích S3 nào
-# (Tigris, Filebase, v.v.), chỉ cần điền đúng endpoint_url/region_name/
-# addressing_style tương ứng bên dưới.
+[cloud]
+# Thông tin xác thực lưu trữ cloud (tương thích S3). Mặc định điền sẵn cho
+# Tigris — dùng được với bất kỳ provider tương thích S3 nào (Tigris,
+# Filebase, AWS S3, Cloudflare R2, v.v.), chỉ cần điền đúng endpoint_url/
+# region_name/addressing_style tương ứng bên dưới.
 # Access key để xác thực
 access_key = "PASTE_YOUR_ACCESS_KEY_HERE"
 # Secret key để xác thực

@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-run.py — Entry point nâng cao với quản lý project, sync Filebase,
+run.py — Entry point nâng cao với quản lý project, sync cloud (Tigris),
 checkpoint gần như real-time, và UX cải tiến.
 
 Tính năng:
   - Menu project thông minh: tạo, liệt kê, tiếp tục, xoá, đồng bộ
   - Checkpoint gần như real-time (mỗi scene/batch)
-  - Tự động sync lên Filebase cloud storage
+  - Tự động sync lên cloud storage (Tigris, hoặc provider S3-compatible khác)
   - Xử lý ngắt an toàn (resume từ checkpoint gần nhất)
   - Theo dõi tiến độ kèm ETA
 
@@ -31,7 +31,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from config import load_config  # noqa: E402
 from checkpoint import CheckpointManager  # noqa: E402
-from filebase_storage import get_filebase_storage_from_config, FilebaseStorage  # noqa: E402
+from cloud_storage import get_cloud_storage_from_config, CloudStorage  # noqa: E402
 from project_manager import ProjectManager  # noqa: E402
 from platform_utils import ensure_ffmpeg  # noqa: E402
 from progress_utils import StepTracker, print_progress_bar  # noqa: E402
@@ -43,6 +43,7 @@ def ensure_python_packages(cfg=None) -> None:
         "faster_whisper": "faster-whisper",
         "scenedetect": "scenedetect",
         "cv2": "opencv-python",
+        "PIL": "Pillow",
         "transformers": "transformers",
         "torch": "torch",
         "openai": "openai",
@@ -128,13 +129,13 @@ def choose_hook(cfg, task_config: dict) -> str | None:
         return hooks[0]["text"]
 
 
-def _list_projects_including_cloud(pm: ProjectManager, filebase: FilebaseStorage | None) -> list[dict]:
+def _list_projects_including_cloud(pm: ProjectManager, cloud: CloudStorage | None) -> list[dict]:
     """Liệt kê project cục bộ + cloud, để không bỏ sót project chỉ còn trên
-    Filebase (vd: ổ đĩa cục bộ vừa bị xoá/mất do máy cloud khởi động lại)."""
-    return pm.list_all_projects(include_cloud=filebase is not None)
+    cloud (vd: ổ đĩa cục bộ vừa bị xoá/mất do máy cloud khởi động lại)."""
+    return pm.list_all_projects(include_cloud=cloud is not None)
 
 
-def _resolve_selected_project(pm: ProjectManager, filebase, selected: dict) -> dict | None:
+def _resolve_selected_project(pm: ProjectManager, cloud, selected: dict) -> dict | None:
     """Nếu project được chọn chỉ tồn tại trên cloud (source == 'cloud_only'),
     tự động tải nó về trước khi thao tác tiếp. Trả về meta mới nhất, hoặc
     None nếu tải thất bại."""
@@ -150,10 +151,22 @@ def _resolve_selected_project(pm: ProjectManager, filebase, selected: dict) -> d
     return pm.get_project_status(project_id)
 
 
-def run_project_menu(cfg, filebase: FilebaseStorage | None) -> None:
+def run_project_menu(cfg, cloud: CloudStorage | None) -> None:
     """Menu quản lý project chính."""
     projects_dir = cfg.resolve_path("paths.projects_dir")
-    pm = ProjectManager(projects_dir, filebase)
+    pm = ProjectManager(projects_dir, cloud)
+
+    # auto_project_scan (project.auto_project_scan trong config.toml, mặc định
+    # true): tự động quét + hiện nhanh số lượng project ngay khi vào menu,
+    # thay vì bắt người dùng phải chọn "3. Liệt kê" trước mới biết có gì.
+    # Trước đây key này hoàn toàn không được đọc ở đâu.
+    if cfg.get("project.auto_project_scan", True):
+        try:
+            projects = _list_projects_including_cloud(pm, cloud)
+            print(f"\n  [project] Đã quét: {len(projects)} project tìm thấy "
+                  f"(cục bộ + cloud).")
+        except Exception as e:
+            print(f"\n  [project] CẢNH BÁO: quét project tự động thất bại: {e}")
 
     while True:
         action = pm.prompt_action()
@@ -174,47 +187,47 @@ def run_project_menu(cfg, filebase: FilebaseStorage | None) -> None:
             try:
                 project_dir = pm.create_project(project_id, video_path, title)
                 print(f"  Đã tạo: {project_dir}")
-                # Đẩy ngay lên Filebase khi vừa tạo — không bắt người dùng
+                # Đẩy ngay lên cloud khi vừa tạo — không bắt người dùng
                 # phải nhớ vào lại menu "5. Đồng bộ" mới có project trên
-                # cloud. Nếu chưa cấu hình Filebase thì bỏ qua im lặng
+                # cloud. Nếu chưa cấu hình cloud thì bỏ qua im lặng
                 # (sync_to_cloud tự trả lỗi rõ ràng trong trường hợp đó).
-                if filebase:
-                    print("  [filebase] Đang đẩy project mới lên cloud...")
+                if cloud:
+                    print("  [cloud] Đang đẩy project mới lên cloud...")
                     result = pm.sync_to_cloud(project_id)
                     if result.get("error") or result.get("aborted"):
-                        print(f"  [filebase] CẢNH BÁO: đẩy lên cloud thất bại: {result}")
+                        print(f"  [cloud] CẢNH BÁO: đẩy lên cloud thất bại: {result}")
                     else:
-                        print(f"  [filebase] Đã có trên cloud: {result['uploaded']} file tải lên.")
+                        print(f"  [cloud] Đã có trên cloud: {result['uploaded']} file tải lên.")
                 else:
-                    print("  [filebase] Chưa cấu hình Filebase — project chỉ đang ở local. "
+                    print("  [cloud] Chưa cấu hình cloud storage — project chỉ đang ở local. "
                           "Điền access_key/secret_key trong config.toml để tự động đẩy lên cloud.")
             except ValueError as e:
                 print(f"  Lỗi: {e}")
 
         elif action == "2":
             # Liệt kê và tiếp tục project (bao gồm cả project chỉ có trên cloud)
-            projects = _list_projects_including_cloud(pm, filebase)
+            projects = _list_projects_including_cloud(pm, cloud)
             if not projects:
                 print("\n  Không tìm thấy project nào (cả cục bộ lẫn cloud). Hãy tạo 1 project trước.")
                 continue
             selected = pm.prompt_select_project(projects)
             if selected:
-                selected = _resolve_selected_project(pm, filebase, selected)
+                selected = _resolve_selected_project(pm, cloud, selected)
                 if not selected:
                     continue
                 print(f"\n  Đã chọn: {selected['project_id']}")
                 print(f"  Trạng thái: {selected.get('status', 'unknown')}")
-                run_pipeline_on_project(cfg, pm, selected["project_id"], filebase)
+                run_pipeline_on_project(cfg, pm, selected["project_id"], cloud)
 
         elif action == "3":
             # Liệt kê tất cả project
-            projects = pm.list_all_projects(include_cloud=filebase is not None)
+            projects = pm.list_all_projects(include_cloud=cloud is not None)
             print(f"\n  Tìm thấy {len(projects)} project:")
             pm.display_projects(projects)
 
         elif action == "4":
             # Xoá project (bao gồm cả project chỉ có trên cloud)
-            projects = _list_projects_including_cloud(pm, filebase)
+            projects = _list_projects_including_cloud(pm, cloud)
             if not projects:
                 print("\n  Không có project nào để xoá.")
                 continue
@@ -224,13 +237,13 @@ def run_project_menu(cfg, filebase: FilebaseStorage | None) -> None:
                 if confirm == "y":
                     if selected.get("source") == "cloud_only":
                         # Không có bản cục bộ để xoá, chỉ có thể xoá trên cloud.
-                        if filebase:
-                            filebase.delete_project(selected["project_id"])
+                        if cloud:
+                            cloud.delete_project(selected["project_id"])
                         else:
-                            print("  Chưa cấu hình Filebase, không thể xoá.")
+                            print("  Chưa cấu hình cloud storage, không thể xoá.")
                     else:
-                        cloud = input("  Xoá luôn trên cloud? (y/N): ").strip().lower() == "y"
-                        pm.delete_project(selected["project_id"], cloud=cloud)
+                        delete_on_cloud = input("  Xoá luôn trên cloud? (y/N): ").strip().lower() == "y"
+                        pm.delete_project(selected["project_id"], cloud=delete_on_cloud)
 
         elif action == "5":
             # Đồng bộ lên cloud
@@ -245,10 +258,10 @@ def run_project_menu(cfg, filebase: FilebaseStorage | None) -> None:
 
         elif action == "6":
             # Tải từ cloud
-            if not filebase:
-                print("\n  Chưa cấu hình Filebase.")
+            if not cloud:
+                print("\n  Chưa cấu hình cloud storage.")
                 continue
-            remote_projects = filebase.list_remote_projects()
+            remote_projects = cloud.list_remote_projects()
             if not remote_projects:
                 print("\n  Không tìm thấy project nào trên cloud.")
                 continue
@@ -266,16 +279,16 @@ def run_project_menu(cfg, filebase: FilebaseStorage | None) -> None:
 
         elif action == "7":
             # Chạy pipeline trên project (bao gồm cả project chỉ có trên cloud)
-            projects = _list_projects_including_cloud(pm, filebase)
+            projects = _list_projects_including_cloud(pm, cloud)
             if not projects:
                 print("\n  Không tìm thấy project nào. Hãy tạo 1 project trước.")
                 continue
             selected = pm.prompt_select_project(projects)
             if selected:
-                selected = _resolve_selected_project(pm, filebase, selected)
+                selected = _resolve_selected_project(pm, cloud, selected)
                 if not selected:
                     continue
-                run_pipeline_on_project(cfg, pm, selected["project_id"], filebase)
+                run_pipeline_on_project(cfg, pm, selected["project_id"], cloud)
 
         else:
             print("  Lựa chọn không hợp lệ. Thử lại.")
@@ -307,7 +320,7 @@ def _ensure_video_in_project(cfg, project_dir: Path, meta: dict, pm: "ProjectMan
     Trường hợp cần: project được tạo mà chưa gán video (bỏ qua ở bước tạo),
     sau đó preprocess.py hỏi và người dùng nhập 1 đường dẫn video mới. Nếu
     không copy video đó vào project_dir/input/ và cập nhật lại meta, lần
-    sync lên Filebase sau đó sẽ lại thiếu video gốc — lặp lại đúng lỗi đã
+    sync lên cloud sau đó sẽ lại thiếu video gốc — lặp lại đúng lỗi đã
     sửa ở project_manager.create_project().
     """
     input_dir = project_dir / "input"
@@ -324,17 +337,34 @@ def _ensure_video_in_project(cfg, project_dir: Path, meta: dict, pm: "ProjectMan
         pass
 
     dest = input_dir / current.name
-    if not dest.exists():
+    if dest.exists() and dest.stat().st_size == current.stat().st_size:
+        # Trùng tên VÀ trùng kích thước -> coi như cùng 1 file, không copy lại.
+        # (So sánh size là kiểm tra rẻ; không phải hash đầy đủ, nhưng đủ để
+        # tránh trường hợp phổ biến nhất: chạy lại pipeline trên đúng video cũ.)
+        pass
+    elif dest.exists():
+        # Trùng tên nhưng KHÁC kích thước -> đây là 1 video MỚI, không được
+        # âm thầm dùng file cũ trong input/. Đặt tên khác để không mất dữ
+        # liệu và đảm bảo pipeline dùng đúng video người dùng vừa cung cấp.
+        stem, suffix = current.stem, current.suffix
+        i = 1
+        while (input_dir / f"{stem}_{i}{suffix}").exists():
+            i += 1
+        dest = input_dir / f"{stem}_{i}{suffix}"
+        shutil.copy2(current, dest)
+        print(f"[project] CẢNH BÁO: input/ đã có file trùng tên nhưng khác nội dung — "
+              f"đã copy video mới vào project với tên khác để không dùng nhầm file cũ: {dest}")
+    else:
         shutil.copy2(current, dest)
         print(f"[project] Đã copy video vào project để đảm bảo đi kèm khi sync: {dest}")
 
-    meta["video_path"] = f"input/{current.name}"
+    meta["video_path"] = f"input/{dest.name}"
     meta["has_input_video"] = True
     pm._save_project_meta(project_dir, meta)
     cfg.set("paths.input_video", str(dest))
 
 
-def run_pipeline_on_project(cfg, pm: ProjectManager, project_id: str, filebase: FilebaseStorage | None) -> None:
+def run_pipeline_on_project(cfg, pm: ProjectManager, project_id: str, cloud: CloudStorage | None) -> None:
     """Chạy toàn bộ pipeline trên 1 project cụ thể."""
     project_dir = pm.base_dir / project_id
     if not project_dir.exists():
@@ -349,11 +379,17 @@ def run_pipeline_on_project(cfg, pm: ProjectManager, project_id: str, filebase: 
     # Cách ly input/output theo đúng project này (xem docstring _scope_paths_to_project).
     _scope_paths_to_project(cfg, project_dir, meta)
 
-    # Thiết lập checkpoint manager riêng cho project, hỗ trợ micro-checkpoint
-    ckpt_dir = project_dir / "checkpoints"
+    # Thiết lập checkpoint manager riêng cho project, hỗ trợ micro-checkpoint.
+    # Thư mục checkpoint LUÔN nằm trong project_dir (bắt buộc cho cách ly
+    # multi-project — xem _scope_paths_to_project ở trên), nhưng TÊN thư mục
+    # con vẫn tôn trọng paths.checkpoint_dir trong config.toml thay vì hard-code
+    # "checkpoints" (trước đây key này hoàn toàn bị bỏ qua).
+    ckpt_subdir_name = Path(cfg.get("paths.checkpoint_dir", "./checkpoints")).name or "checkpoints"
+    ckpt_dir = project_dir / ckpt_subdir_name
     auto_sync_cloud = cfg.get("processing.auto_sync_cloud", True)
-    ckpt = CheckpointManager(ckpt_dir, project_id=project_id, filebase_storage=filebase,
-                              auto_sync_cloud=auto_sync_cloud)
+    auto_save_interval = cfg.get("project.auto_save_interval", 0)
+    ckpt = CheckpointManager(ckpt_dir, project_id=project_id, cloud_storage=cloud,
+                              auto_sync_cloud=auto_sync_cloud, auto_save_interval=auto_save_interval)
 
     print("\n[pipeline] Trạng thái từng stage:")
     for stage, done in ckpt.status().items():
@@ -411,11 +447,11 @@ def run_pipeline_on_project(cfg, pm: ProjectManager, project_id: str, filebase: 
             # Đồng bộ NGAY project thật (không chỉ checkpoint JSON) lên cloud
             # sau mỗi stage chạy thật, để cloud không bao giờ có checkpoint
             # "mồ côi" (không có file thật đi kèm) như đã xảy ra trước đây.
-            if filebase and cfg.get("filebase.enabled", True) and auto_sync_cloud:
-                print(f"[filebase] Đồng bộ output của '{stage}' lên cloud...")
+            if cloud and cfg.get("cloud.enabled", True) and auto_sync_cloud:
+                print(f"[cloud] Đồng bộ output của '{stage}' lên cloud...")
                 sync_result = pm.sync_to_cloud(project_id)
                 if sync_result.get("error") or sync_result.get("aborted"):
-                    print(f"[filebase] CẢNH BÁO: đồng bộ '{stage}' lên cloud thất bại: {sync_result}")
+                    print(f"[cloud] CẢNH BÁO: đồng bộ '{stage}' lên cloud thất bại: {sync_result}")
         return result
 
     preprocess_result = run_stage("preprocess", lambda: preprocess.run_preprocess(cfg, ckpt))
@@ -427,7 +463,7 @@ def run_pipeline_on_project(cfg, pm: ProjectManager, project_id: str, filebase: 
     # khi run_stage("preprocess", ...) đã đồng bộ lên cloud lần đầu (nếu
     # preprocess chạy thật) -> đồng bộ thêm 1 lần nữa để đảm bảo video luôn
     # đi kèm, không phải chờ tới stage kế tiếp chạy thật mới được đồng bộ.
-    if filebase and cfg.get("filebase.enabled", True) and auto_sync_cloud:
+    if cloud and cfg.get("cloud.enabled", True) and auto_sync_cloud:
         pm.sync_to_cloud(project_id)
 
     asr_timeline = run_stage("asr", lambda: asr.run_asr(cfg, preprocess_result, ckpt))
@@ -457,8 +493,8 @@ def run_pipeline_on_project(cfg, pm: ProjectManager, project_id: str, filebase: 
     pm._save_project_meta(project_dir, meta)
 
     # Sync cuối cùng lên cloud
-    if filebase and cfg.get("filebase.enabled", True):
-        print("\n[filebase] Đồng bộ cuối cùng lên cloud...")
+    if cloud and cfg.get("cloud.enabled", True):
+        print("\n[cloud] Đồng bộ cuối cùng lên cloud...")
         pm.sync_to_cloud(project_id)
 
     print("\n" + "=" * 60)
@@ -480,7 +516,7 @@ def main() -> None:
 
     print("=" * 70)
     print("  AI DIRECTOR VIDEO COMMENTARY — Pipeline nâng cao")
-    print("  Kèm Quản lý Project, Đồng bộ Filebase, Checkpoint Real-time")
+    print("  Kèm Quản lý Project, Đồng bộ Cloud (Tigris), Checkpoint Real-time")
     print("=" * 70)
 
     ensure_ffmpeg()
@@ -495,8 +531,8 @@ def main() -> None:
         os.environ["HUGGING_FACE_HUB_TOKEN"] = hf_token
         print("[main] Đã nạp HF token từ config.toml.")
 
-    # Khởi tạo Filebase
-    filebase = get_filebase_storage_from_config(cfg)
+    # Khởi tạo cloud storage
+    cloud = get_cloud_storage_from_config(cfg)
 
     # Kiểm tra có chạy ở chế độ menu project không.
     # Chế độ non-interactive được kích hoạt bởi: cờ --no-menu (ưu tiên cao
@@ -506,12 +542,12 @@ def main() -> None:
     interactive = sys.stdin.isatty() and not args.no_menu
 
     if interactive and show_menu:
-        run_project_menu(cfg, filebase)
+        run_project_menu(cfg, cloud)
     else:
         # Non-interactive: chạy thẳng trên project mặc định
         print("[main] Đang chạy ở chế độ non-interactive...")
         projects_dir = cfg.resolve_path("paths.projects_dir")
-        pm = ProjectManager(projects_dir, filebase)
+        pm = ProjectManager(projects_dir, cloud)
 
         # Tạo project mặc định nếu chưa có
         default_id = "default"
@@ -519,7 +555,7 @@ def main() -> None:
         if not project_dir.exists():
             pm.create_project(default_id, cfg.get("paths.input_video", ""), "Default Project")
 
-        run_pipeline_on_project(cfg, pm, default_id, filebase)
+        run_pipeline_on_project(cfg, pm, default_id, cloud)
 
 
 if __name__ == "__main__":

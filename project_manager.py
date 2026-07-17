@@ -1,7 +1,7 @@
 """
 project_manager.py — Hệ thống quản lý project thông minh.
 
-Quét các project cục bộ, đồng bộ với Filebase, và cho phép người dùng:
+Quét các project cục bộ, đồng bộ với cloud storage (Tigris), và cho phép người dùng:
   - Liệt kê tất cả project (local + cloud)
   - Tiếp tục 1 project (resume từ checkpoint)
   - Xoá 1 project (local và/hoặc cloud)
@@ -26,12 +26,12 @@ from typing import Any
 
 
 class ProjectManager:
-    """Quản lý các project của AI Director Video, cả cục bộ lẫn trên Filebase."""
+    """Quản lý các project của AI Director Video, cả cục bộ lẫn trên cloud."""
 
-    def __init__(self, base_dir: Path, filebase_storage=None):
+    def __init__(self, base_dir: Path, cloud_storage=None):
         self.base_dir = base_dir
         self.base_dir.mkdir(parents=True, exist_ok=True)
-        self.filebase = filebase_storage
+        self.cloud = cloud_storage
         self.projects_index_path = self.base_dir / "_projects_index.json"
 
     def scan_local_projects(self) -> list[dict[str, Any]]:
@@ -149,9 +149,28 @@ class ProjectManager:
                 meta["has_final_output"] = True
                 meta["status"] = "completed"
 
+        # BUGFIX: project_dir.stat().st_mtime chỉ thay đổi khi có file/thư mục
+        # con TRỰC TIẾP được thêm/xoá/đổi tên bên trong project_dir — KHÔNG
+        # thay đổi khi 1 file nằm SÂU bên trong checkpoints/ hoặc output/ được
+        # ghi (vd checkpoint mới, audio.wav, voiceover.mp3...). Vì project_dir
+        # chỉ tạo input/checkpoints/output MỘT LẦN lúc create_project(), mtime
+        # của chính nó gần như đứng im suốt đời project dù pipeline vẫn đang
+        # chạy — khiến "Sửa lần cuối" hiển thị sai, luôn gần bằng lúc tạo.
+        # Giờ lấy mtime MỚI NHẤT trong số: project_dir, và mọi file thật bên
+        # trong checkpoints/ + output/ (input/ bỏ qua vì video gốc hiếm khi
+        # đổi sau khi copy, không phản ánh tiến độ).
+        latest_mtime = project_dir.stat().st_mtime
+        for sub in (ckpt_dir, project_dir / "output"):
+            if sub.exists():
+                for f in sub.rglob("*"):
+                    if f.is_file():
+                        try:
+                            latest_mtime = max(latest_mtime, f.stat().st_mtime)
+                        except OSError:
+                            pass
         meta["last_modified"] = time.strftime(
             "%Y-%m-%d %H:%M:%S",
-            time.localtime(max(project_dir.stat().st_mtime, 0))
+            time.localtime(max(latest_mtime, 0))
         )
 
         self._save_project_meta(project_dir, meta)
@@ -218,7 +237,7 @@ class ProjectManager:
         return project_dir
 
     def delete_project(self, project_id: str, cloud: bool = False) -> bool:
-        """Xoá 1 project cục bộ, và tuỳ chọn xoá luôn trên Filebase."""
+        """Xoá 1 project cục bộ, và tuỳ chọn xoá luôn trên cloud."""
         project_dir = self.base_dir / project_id
         if not project_dir.exists():
             print(f"[project] Không tìm thấy project '{project_id}' cục bộ.")
@@ -227,8 +246,8 @@ class ProjectManager:
         shutil.rmtree(project_dir)
         print(f"[project] Đã xoá project cục bộ: {project_id}")
 
-        if cloud and self.filebase:
-            ok = self.filebase.delete_project(project_id)
+        if cloud and self.cloud:
+            ok = self.cloud.delete_project(project_id)
             if ok:
                 print(f"[project] Đã xoá project trên cloud: {project_id}")
             return ok
@@ -262,8 +281,8 @@ class ProjectManager:
         local_projects = self.scan_local_projects()
         local_ids = {p["project_id"] for p in local_projects}
 
-        if include_cloud and self.filebase:
-            remote_projects = self.filebase.list_remote_projects()
+        if include_cloud and self.cloud:
+            remote_projects = self.cloud.list_remote_projects()
             for rp in remote_projects:
                 if rp["project_id"] not in local_ids:
                     rp["source"] = "cloud_only"
@@ -296,7 +315,13 @@ class ProjectManager:
                 "cloud_only": "CLD",
                 "needs_recompute": "WARN",
             }.get(status, "???")
-            print(f"  {i:<4} {pid:<30} {status_icon:<15} {completed}/{total:<10} {modified:<20} {source:<10}")
+            # BUGFIX: trước đây là "{completed}/{total:<10}" — format spec
+            # :<10 chỉ áp dụng cho `total`, không áp dụng cho cả chuỗi
+            # "completed/total", nên cột "Sửa lần cuối" phía sau bị lệch
+            # tuỳ theo số chữ số của completed/total. Ghép chuỗi trước rồi
+            # mới canh lề cho đúng cả cột.
+            stage_str = f"{completed}/{total}"
+            print(f"  {i:<4} {pid:<30} {status_icon:<15} {stage_str:<10} {modified:<20} {source:<10}")
 
     def prompt_select_project(self, projects: list[dict[str, Any]]) -> dict[str, Any] | None:
         """Hỏi người dùng chọn 1 project từ danh sách."""
@@ -319,34 +344,34 @@ class ProjectManager:
         return None
 
     def sync_to_cloud(self, project_id: str) -> dict[str, Any]:
-        """Đồng bộ 1 project cục bộ lên Filebase Storage."""
-        if not self.filebase:
-            return {"error": "Chưa cấu hình Filebase"}
+        """Đồng bộ 1 project cục bộ lên cloud storage."""
+        if not self.cloud:
+            return {"error": "Chưa cấu hình cloud storage"}
 
         project_dir = self.base_dir / project_id
         if not project_dir.exists():
             return {"error": f"Không tìm thấy project '{project_id}' cục bộ"}
 
-        print(f"[filebase] Đang upload project '{project_id}' lên cloud "
+        print(f"[cloud] Đang upload project '{project_id}' lên cloud "
               f"(bao gồm cả video gốc trong input/, checkpoint, và output)...")
-        result = self.filebase.upload_project(project_dir, project_id)
-        print(f"[filebase] Upload xong: {result['uploaded']} file, "
+        result = self.cloud.upload_project(project_dir, project_id)
+        print(f"[cloud] Upload xong: {result['uploaded']} file, "
               f"{result.get('skipped', 0)} file bỏ qua (đã có sẵn, không đổi), "
               f"{result['errors']} lỗi.")
         return result
 
     def sync_from_cloud(self, project_id: str) -> bool:
-        """Tải 1 project từ Filebase Storage về máy."""
-        if not self.filebase:
-            print("[filebase] Chưa cấu hình Filebase.")
+        """Tải 1 project từ cloud storage về máy."""
+        if not self.cloud:
+            print("[cloud] Chưa cấu hình cloud storage.")
             return False
 
         project_dir = self.base_dir / project_id
-        print(f"[filebase] Đang tải project '{project_id}' từ cloud...")
-        ok = self.filebase.download_project(project_id, project_dir)
+        print(f"[cloud] Đang tải project '{project_id}' từ cloud...")
+        ok = self.cloud.download_project(project_id, project_dir)
         if ok:
             self._create_project_meta(project_dir)
-            print(f"[filebase] Tải xong: {project_dir}")
+            print(f"[cloud] Tải xong: {project_dir}")
         return ok
 
     def prompt_action(self) -> str | None:
@@ -358,7 +383,7 @@ class ProjectManager:
         print("  2. Tiếp tục project có sẵn")
         print("  3. Liệt kê tất cả project")
         print("  4. Xoá 1 project")
-        print("  5. Đồng bộ project lên cloud (Filebase)")
+        print("  5. Đồng bộ project lên cloud (Tigris)")
         print("  6. Tải project từ cloud về")
         print("  7. Chạy pipeline trên 1 project")
         print("  0. Thoát")

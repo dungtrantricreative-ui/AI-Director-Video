@@ -75,6 +75,11 @@ def _chat(cfg, system_prompt: str, user_prompt: str) -> str:
     return "".join(chunks)
 
 
+class ScriptWriterJSONError(RuntimeError):
+    """LLM trả về JSON hỏng/bị cắt sau khi đã thử lại — lỗi rõ ràng thay vì
+    một json.JSONDecodeError khó hiểu lẫn trong traceback."""
+
+
 def _extract_json(text: str) -> Any:
     """Trích JSON từ output LLM, chấp nhận việc model bọc trong ```json ... ```."""
     text = text.strip()
@@ -91,6 +96,36 @@ def _extract_json(text: str) -> Any:
         if start != -1 and end != -1 and end > start:
             return json.loads(text[start:end + 1])
         raise
+
+
+def _chat_json(cfg, system_prompt: str, user_prompt: str, *, stage: str, max_retries: int = 1) -> Any:
+    """Gọi `_chat()` rồi parse JSON qua `_extract_json()`, có retry khi JSON hỏng/bị cắt
+    (vd: output chạm `cerebras_max_tokens` giữa chừng). Nếu vẫn lỗi sau khi retry,
+    raise `ScriptWriterJSONError` rõ ràng thay vì để `json.JSONDecodeError` thô lọt
+    ra ngoài với traceback khó hiểu.
+    """
+    last_err: Exception | None = None
+    for attempt in range(max_retries + 1):
+        prompt = user_prompt
+        if attempt > 0:
+            prompt += (
+                "\n\nLƯU Ý: lần trước output của bạn KHÔNG phải JSON hợp lệ (có thể bị "
+                "cắt giữa chừng hoặc lẫn text thừa). Lần này trả lời NGẮN GỌN HƠN nếu "
+                "cần và CHỈ trả về đúng 1 JSON hợp lệ, không thêm bất kỳ text nào khác."
+            )
+        raw = _chat(cfg, system_prompt, prompt)
+        try:
+            return _extract_json(raw)
+        except json.JSONDecodeError as e:
+            last_err = e
+            print(f"[script_writer] CẢNH BÁO: JSON từ LLM ở stage '{stage}' bị hỏng/cắt "
+                  f"(lần thử {attempt + 1}/{max_retries + 1}): {e}")
+    raise ScriptWriterJSONError(
+        f"Stage '{stage}': LLM liên tục trả về JSON hỏng/bị cắt sau "
+        f"{max_retries + 1} lần thử ({last_err}). Có thể do cerebras_max_tokens quá "
+        f"thấp so với độ dài yêu cầu — thử tăng 'api.cerebras_max_tokens' trong "
+        f"config.toml, hoặc chạy lại (lỗi mạng/API tạm thời)."
+    ) from last_err
 
 
 def generate_hooks(cfg, task_config: dict[str, Any], director_brief: str = "") -> list[dict[str, str]]:
@@ -114,8 +149,7 @@ def generate_hooks(cfg, task_config: dict[str, Any], director_brief: str = "") -
         "3 contrast/payoff twists, 3 absurd/dramatic, 2 suspense/conflict, "
         "1 question-style, 1 data+emotion. No slow build-up, no cliché openers."
     )
-    raw = _chat(cfg, system_prompt, user_prompt)
-    return _extract_json(raw)
+    return _chat_json(cfg, system_prompt, user_prompt, stage="hooks")
 
 
 def generate_narration(
@@ -184,8 +218,7 @@ def generate_narration(
         "Write the full narration now as the JSON array described in the system prompt."
     )
 
-    raw = _chat(cfg, system_prompt, user_prompt)
-    sentences = _extract_json(raw)
+    sentences = _chat_json(cfg, system_prompt, user_prompt, stage="narration")
 
     # Lọc bỏ mọi scene_id không tồn tại thật trong semantic_blocks (an toàn chống LLM bịa).
     valid_scene_ids = {b["scene_id"] for b in semantic_blocks}

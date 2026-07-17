@@ -1,7 +1,7 @@
 # Config (contains API keys) - do not commit
 config.toml
 
-# Data / model directories - created when running setup.py or run.py
+# Data / model directories - created when running run.py
 input/
 output/
 checkpoints/
