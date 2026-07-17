@@ -565,11 +565,18 @@ class CloudStorage:
         print(f"[cloud] Đã xoá {deleted} file của project '{project_id}'")
         return deleted > 0
 
-    def sync_checkpoint(self, project_dir: Path, project_id: str, stage: str) -> bool:
-        """Upload riêng 1 file checkpoint (dùng cho sync nhanh 1 stage)."""
+    def sync_checkpoint(self, project_dir: Path, project_id: str, stage: str,
+                         checkpoint_subdir: str = "checkpoints") -> bool:
+        """Upload riêng 1 file checkpoint (dùng cho sync nhanh 1 stage).
+
+        LƯU Ý: hiện KHÔNG có nơi nào trong codebase gọi hàm này (checkpoint
+        sync thật đang đi qua CheckpointManager._sync_to_cloud() trong
+        checkpoint.py). `checkpoint_subdir` phải khớp với tên thư mục
+        checkpoint thật (xem paths.checkpoint_dir trong config.toml) nếu
+        được dùng trong tương lai."""
         if not self.bucket_ready:
             return False
-        ckpt_file = project_dir / "checkpoints" / f"{stage}.json"
+        ckpt_file = project_dir / checkpoint_subdir / f"{stage}.json"
         if ckpt_file.exists():
             remote_key = f"projects/{project_id}/checkpoints/{stage}.json"
             return self._upload_file(ckpt_file, remote_key)

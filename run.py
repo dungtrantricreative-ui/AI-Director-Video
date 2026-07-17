@@ -37,6 +37,15 @@ from platform_utils import ensure_ffmpeg  # noqa: E402
 from progress_utils import StepTracker, print_progress_bar  # noqa: E402
 
 
+def _checkpoint_subdir_name(cfg) -> str:
+    """Tên thư mục con chứa checkpoint bên trong mỗi project_dir, đọc từ
+    paths.checkpoint_dir trong config.toml (mặc định "checkpoints"). Dùng
+    CHUNG cho cả CheckpointManager (run_pipeline_on_project) và
+    ProjectManager (quét trạng thái project) để 2 nơi không bao giờ lệch tên
+    thư mục với nhau."""
+    return Path(cfg.get("paths.checkpoint_dir", "./checkpoints")).name or "checkpoints"
+
+
 def ensure_python_packages(cfg=None) -> None:
     """Kiểm tra và cài đặt các package cần thiết."""
     checks = {
@@ -154,7 +163,7 @@ def _resolve_selected_project(pm: ProjectManager, cloud, selected: dict) -> dict
 def run_project_menu(cfg, cloud: CloudStorage | None) -> None:
     """Menu quản lý project chính."""
     projects_dir = cfg.resolve_path("paths.projects_dir")
-    pm = ProjectManager(projects_dir, cloud)
+    pm = ProjectManager(projects_dir, cloud, checkpoint_subdir=_checkpoint_subdir_name(cfg))
 
     # auto_project_scan (project.auto_project_scan trong config.toml, mặc định
     # true): tự động quét + hiện nhanh số lượng project ngay khi vào menu,
@@ -384,7 +393,7 @@ def run_pipeline_on_project(cfg, pm: ProjectManager, project_id: str, cloud: Clo
     # multi-project — xem _scope_paths_to_project ở trên), nhưng TÊN thư mục
     # con vẫn tôn trọng paths.checkpoint_dir trong config.toml thay vì hard-code
     # "checkpoints" (trước đây key này hoàn toàn bị bỏ qua).
-    ckpt_subdir_name = Path(cfg.get("paths.checkpoint_dir", "./checkpoints")).name or "checkpoints"
+    ckpt_subdir_name = _checkpoint_subdir_name(cfg)
     ckpt_dir = project_dir / ckpt_subdir_name
     auto_sync_cloud = cfg.get("processing.auto_sync_cloud", True)
     auto_save_interval = cfg.get("project.auto_save_interval", 0)
@@ -547,7 +556,7 @@ def main() -> None:
         # Non-interactive: chạy thẳng trên project mặc định
         print("[main] Đang chạy ở chế độ non-interactive...")
         projects_dir = cfg.resolve_path("paths.projects_dir")
-        pm = ProjectManager(projects_dir, cloud)
+        pm = ProjectManager(projects_dir, cloud, checkpoint_subdir=_checkpoint_subdir_name(cfg))
 
         # Tạo project mặc định nếu chưa có
         default_id = "default"

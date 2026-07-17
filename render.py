@@ -235,7 +235,6 @@ def run_render(cfg, storyboard: dict[str, Any], tts_result: dict[str, Any] | Non
 
     clip_paths = []
     total_clips = len(storyboard["timeline"])
-    micro_interval = cfg.get("processing.micro_checkpoint_interval", 1)
 
     # Resume: bỏ qua các clip đã render xong ở lần chạy trước (checkpoint đã
     # ghi VÀ file .mp4 tương ứng vẫn còn trên đĩa). Trước đây stage này chỉ
@@ -257,8 +256,14 @@ def run_render(cfg, storyboard: dict[str, Any], tts_result: dict[str, Any] | Non
         clip_paths.append(out_path)
         print_progress_bar(idx, total_clips, prefix="[render] clips", suffix=clip["clip_id"])
 
-        # Micro-checkpoint per clip
-        if checkpoint_mgr is not None and idx % micro_interval == 0:
+        # Micro-checkpoint per clip. LUÔN lưu (không throttle theo
+        # micro_interval) — clip vừa render tốn thời gian ffmpeg thật, nếu
+        # throttle và crash giữa chừng, clip đã render xong nhưng chưa tới
+        # mốc lưu sẽ bị RENDER LẠI không cần thiết khi resume (giống lỗi đã
+        # sửa ở nhánh API của vision.py). Ghi JSON cục bộ rất rẻ; việc
+        # throttle tần suất SYNC LÊN CLOUD đã được xử lý riêng trong
+        # CheckpointManager.save_micro().
+        if checkpoint_mgr is not None:
             checkpoint_mgr.save_micro("render", clip["clip_id"], {
                 "clip_id": clip["clip_id"],
                 "clip_path": str(out_path),

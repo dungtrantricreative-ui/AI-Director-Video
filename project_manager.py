@@ -28,11 +28,18 @@ from typing import Any
 class ProjectManager:
     """Quản lý các project của AI Director Video, cả cục bộ lẫn trên cloud."""
 
-    def __init__(self, base_dir: Path, cloud_storage=None):
+    def __init__(self, base_dir: Path, cloud_storage=None, checkpoint_subdir: str = "checkpoints"):
         self.base_dir = base_dir
         self.base_dir.mkdir(parents=True, exist_ok=True)
         self.cloud = cloud_storage
         self.projects_index_path = self.base_dir / "_projects_index.json"
+        # Tên thư mục con chứa checkpoint bên trong mỗi project_dir. PHẢI khớp
+        # với tên mà CheckpointManager thực sự dùng (xem run.py:
+        # run_pipeline_on_project, đọc từ paths.checkpoint_dir trong
+        # config.toml) — nếu 2 nơi lệch nhau, việc quét trạng thái project ở
+        # đây sẽ tìm sai thư mục và luôn báo "chưa có checkpoint" dù pipeline
+        # đã chạy xong.
+        self.checkpoint_subdir = checkpoint_subdir or "checkpoints"
 
     def scan_local_projects(self) -> list[dict[str, Any]]:
         """Quét toàn bộ thư mục project bên trong base_dir."""
@@ -95,7 +102,7 @@ class ProjectManager:
         nguyên từ metadata cũ.
         """
         # Quét checkpoint để xác định trạng thái
-        ckpt_dir = project_dir / "checkpoints"
+        ckpt_dir = project_dir / self.checkpoint_subdir
         if ckpt_dir.exists():
             stages = ["preprocess", "asr", "vision", "semantic_graph", "script", "tts", "render"]
             completed = []
@@ -198,7 +205,7 @@ class ProjectManager:
 
         project_dir.mkdir(parents=True)
         (project_dir / "input").mkdir()
-        (project_dir / "checkpoints").mkdir()
+        (project_dir / self.checkpoint_subdir).mkdir()
         (project_dir / "output" / "pipeline").mkdir(parents=True)
         (project_dir / "output" / "deliverables").mkdir(parents=True)
 
@@ -267,7 +274,7 @@ class ProjectManager:
         meta["local_path"] = str(project_dir)
 
         # Kiểm tra checkpoint
-        ckpt_dir = project_dir / "checkpoints"
+        ckpt_dir = project_dir / self.checkpoint_subdir
         if ckpt_dir.exists():
             stages = ["preprocess", "asr", "vision", "semantic_graph", "script", "tts", "render"]
             for s in stages:

@@ -280,7 +280,7 @@ def run_preprocess(cfg, checkpoint_mgr=None) -> dict[str, Any]:
 
     # Micro-checkpoint: save after each keyframe batch
     if checkpoint_mgr is not None:
-        micro_interval = cfg.get("processing.micro_checkpoint_interval", 1)
+        micro_interval = max(1, cfg.get("processing.micro_checkpoint_interval", 1))
         for i in range(0, len(scenes), micro_interval):
             chunk = scenes[i:i + micro_interval]
             chunk_keyframes = {s["scene_id"]: keyframes.get(s["scene_id"], []) for s in chunk}
