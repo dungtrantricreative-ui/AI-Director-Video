@@ -245,8 +245,8 @@ show_project_menu_on_start = false
 
 Repo có sẵn workflow `.github/workflows/run-pipeline.yml` để chạy pipeline
 trên máy ảo của GitHub thay vì phải mở Colab. Máy ảo này **không có GPU**,
-nên workflow đã cấu hình sẵn `vision_backend = "mistral"` (gọi API thay vì
-chạy model Qwen3-VL local) — nếu đổi lại `"local"` pipeline sẽ rất chậm hoặc
+nên nên đặt `vision_backend = "mistral"` (gọi API thay vì chạy model
+Qwen3-VL local) trong `config.toml` — để `"local"` pipeline sẽ rất chậm hoặc
 treo vì chạy vision model bằng CPU.
 
 **Cách hoạt động:** vì máy ảo bị xoá sạch sau mỗi lần chạy, project phải
@@ -262,20 +262,20 @@ Nếu không có project nào đang dang dở, workflow tự thoát êm — khô
 
 ### Thiết lập (làm 1 lần)
 
-1. Vào repo trên GitHub → **Settings → Secrets and variables → Actions →
-   New repository secret**, thêm lần lượt các secret sau:
+> **CẢNH BÁO:** repo này đang **public** và `config.toml` (chứa API key
+> thật) đã được commit thẳng vào repo theo yêu cầu — bất kỳ ai xem repo
+> đều thấy được các key này. Nếu key bị người khác lấy và dùng, bạn sẽ
+> chịu chi phí/quota bị dùng trộm. Nên dùng key riêng cho việc này (dễ thu
+> hồi) và cân nhắc đổi repo sang Private hoặc chuyển lại sang dùng GitHub
+> Secrets nếu muốn an toàn hơn.
 
-   | Tên secret | Giá trị |
-   |---|---|
-   | `CEREBRAS_API_KEY` | API key Cerebras (bắt buộc — dùng viết kịch bản) |
-   | `MISTRAL_API_KEY` | API key Mistral (bắt buộc — dùng đọc hình ảnh, vì không có GPU) |
-   | `HF_TOKEN` | Token Hugging Face (để trống nếu không dùng model cần auth) |
-   | `CLOUD_ACCESS_KEY` | Access key của Tigris/S3 |
-   | `CLOUD_SECRET_KEY` | Secret key của Tigris/S3 |
-   | `CLOUD_BUCKET_NAME` | Tên bucket, vd `ai-director-video` |
-   | `CLOUD_ENDPOINT_URL` | vd `https://t3.storage.dev` (Tigris) |
-   | `CLOUD_REGION_NAME` | vd `auto` (Tigris) |
-   | `CLOUD_ADDRESSING_STYLE` | vd `virtual` (Tigris) |
+1. Điền đầy đủ key thật vào `config.toml` ở máy bạn (mục `[api]` và
+   `[cloud]`), rồi commit + push file này lên GitHub:
+   ```bash
+   git add -f config.toml   # -f cần thiết vì trước đó file này bị .gitignore
+   git commit -m "Thêm config.toml cho GitHub Actions"
+   git push origin main
+   ```
 
 2. Tạo project và upload video như bình thường (`python run.py` ở máy cá
    nhân, hoặc Colab), rồi chọn **"5. Sync project to cloud"** để đẩy project
@@ -296,6 +296,8 @@ Nếu không có project nào đang dang dở, workflow tự thoát êm — khô
 - **Chỉ chạy 1 project/lần**: nếu có nhiều project dang dở, mỗi lần chạy chỉ
   xử lý 1 project (mới nhất); các project còn lại sẽ được xử lý ở lần chạy
   kế tiếp.
+- **Mỗi lần sửa key**: sửa `config.toml` ở máy bạn rồi commit + push lại —
+  workflow luôn dùng đúng file `config.toml` mới nhất trong repo.
 
 ---
 

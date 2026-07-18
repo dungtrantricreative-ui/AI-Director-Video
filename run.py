@@ -81,8 +81,14 @@ def ensure_python_packages(cfg=None) -> None:
         print("[deps] Tất cả package đã sẵn sàng.")
 
 
-def ask_task_config(cfg) -> dict:
-    """Thu thập cấu hình nội dung từ người dùng."""
+def ask_task_config(cfg, project_reference_urls: list[str] | None = None) -> dict:
+    """Thu thập cấu hình nội dung từ người dùng.
+
+    project_reference_urls: link đối thủ đã được nhập RIÊNG cho project này
+    lúc tạo project (xem menu "1. Tạo project mới"). Nếu đã có, dùng luôn,
+    KHÔNG hỏi lại và KHÔNG rơi về danh sách chung trong config.toml — vì mỗi
+    project/video thường có đối thủ khác nhau.
+    """
     task_config = {
         "narration_pov": cfg.get("processing.narration_pov", "third_person"),
         "content_type": cfg.get("processing.content_type", "movie"),
@@ -95,7 +101,7 @@ def ask_task_config(cfg) -> dict:
         print("[task] Non-interactive: dùng giá trị mặc định từ config.toml")
         task_config["title"] = ""
         task_config["plot_summary"] = ""
-        task_config["reference_urls"] = cfg.get("reference.urls", [])
+        task_config["reference_urls"] = project_reference_urls or cfg.get("reference.urls", [])
         return task_config
 
     print("\n" + "=" * 60)
@@ -103,6 +109,11 @@ def ask_task_config(cfg) -> dict:
     print("=" * 60)
     task_config["title"] = input("  Tên phim/video: ").strip()
     task_config["plot_summary"] = input("  Tóm tắt cốt truyện (tuỳ chọn): ").strip()
+    if project_reference_urls:
+        # Đã nhập lúc tạo project -> dùng luôn, không hỏi lại lần nữa.
+        print(f"  Link đối thủ: dùng {len(project_reference_urls)} link đã nhập lúc tạo project.")
+        task_config["reference_urls"] = project_reference_urls
+        return task_config
     ref_input = input(
         "  Link video tham khảo (đối thủ, cách nhau bởi dấu phẩy, tuỳ chọn): "
     ).strip()
@@ -202,8 +213,12 @@ def run_project_menu(cfg, cloud: CloudStorage | None) -> None:
                 continue
             video_path = input("  Đường dẫn file video (Enter để bỏ qua): ").strip()
             title = input("  Tên project (Enter để dùng ID): ").strip()
+            ref_input = input(
+                "  Link video tham khảo (đối thủ, cách nhau bởi dấu phẩy, tuỳ chọn): "
+            ).strip()
+            reference_urls = [u.strip() for u in ref_input.split(",") if u.strip()]
             try:
-                project_dir = pm.create_project(project_id, video_path, title)
+                project_dir = pm.create_project(project_id, video_path, title, reference_urls)
                 print(f"  Đã tạo: {project_dir}")
                 # Đẩy ngay lên cloud khi vừa tạo — không bắt người dùng
                 # phải nhớ vào lại menu "5. Đồng bộ" mới có project trên
@@ -502,7 +517,7 @@ def run_pipeline_on_project(cfg, pm: ProjectManager, project_id: str, cloud: Clo
 
     def _get_task_config() -> dict:
         if "value" not in _task_config_cache:
-            _task_config_cache["value"] = ask_task_config(cfg)
+            _task_config_cache["value"] = ask_task_config(cfg, meta.get("reference_urls"))
         return _task_config_cache["value"]
 
     def _run_reference():

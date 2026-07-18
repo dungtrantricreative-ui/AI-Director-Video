@@ -194,11 +194,18 @@ class ProjectManager:
             "last_modified": "",
             "stages_completed": [],
             "total_stages": 7,
+            "reference_urls": [],
         }
         return self._refresh_project_meta(project_dir, meta)
 
-    def create_project(self, project_id: str, video_path: str = "", title: str = "") -> Path:
-        """Tạo thư mục project mới với đầy đủ cấu trúc con."""
+    def create_project(self, project_id: str, video_path: str = "", title: str = "",
+                        reference_urls: list[str] | None = None) -> Path:
+        """Tạo thư mục project mới với đầy đủ cấu trúc con.
+
+        reference_urls: link video đối thủ (tuỳ chọn) — lưu RIÊNG cho project
+        này (khác project khác có thể có đối thủ khác), thay vì phải dùng
+        chung 1 danh sách cố định trong config.toml cho mọi project.
+        """
         project_dir = self.base_dir / project_id
         if project_dir.exists():
             raise ValueError(f"Project '{project_id}' đã tồn tại.")
@@ -238,6 +245,7 @@ class ProjectManager:
             "total_stages": 7,
             "has_config": False,
             "has_input_video": bool(rel_video_path),
+            "reference_urls": reference_urls or [],
         }
         self._save_project_meta(project_dir, meta)
         print(f"[project] Đã tạo project: {project_id}")
