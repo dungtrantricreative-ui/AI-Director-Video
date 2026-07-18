@@ -35,6 +35,7 @@ from cloud_storage import get_cloud_storage_from_config, CloudStorage  # noqa: E
 from project_manager import ProjectManager  # noqa: E402
 from platform_utils import ensure_ffmpeg  # noqa: E402
 from progress_utils import StepTracker, print_progress_bar  # noqa: E402
+import reference_video  # noqa: E402
 
 
 def _checkpoint_subdir_name(cfg) -> str:
@@ -94,6 +95,7 @@ def ask_task_config(cfg) -> dict:
         print("[task] Non-interactive: dùng giá trị mặc định từ config.toml")
         task_config["title"] = ""
         task_config["plot_summary"] = ""
+        task_config["reference_urls"] = cfg.get("reference.urls", [])
         return task_config
 
     print("\n" + "=" * 60)
@@ -101,6 +103,13 @@ def ask_task_config(cfg) -> dict:
     print("=" * 60)
     task_config["title"] = input("  Tên phim/video: ").strip()
     task_config["plot_summary"] = input("  Tóm tắt cốt truyện (tuỳ chọn): ").strip()
+    ref_input = input(
+        "  Link video tham khảo (đối thủ, cách nhau bởi dấu phẩy, tuỳ chọn): "
+    ).strip()
+    if ref_input:
+        task_config["reference_urls"] = [u.strip() for u in ref_input.split(",") if u.strip()]
+    else:
+        task_config["reference_urls"] = cfg.get("reference.urls", [])
     return task_config
 
 
@@ -408,7 +417,7 @@ def run_pipeline_on_project(cfg, pm: ProjectManager, project_id: str, cloud: Clo
 
     import preprocess, asr, vision, semantic_graph, script_writer, tts, render
 
-    stages = ["preprocess", "asr", "vision", "semantic_graph", "script", "tts", "render"]
+    stages = ["preprocess", "asr", "vision", "semantic_graph", "reference", "script", "tts", "render"]
     tracker = StepTracker(stages)
 
     # BUGFIX: checkpoint JSON được tự động đẩy lên cloud gần như real-time
@@ -432,6 +441,7 @@ def run_pipeline_on_project(cfg, pm: ProjectManager, project_id: str, cloud: Clo
         "asr": ["output/pipeline/asr_timeline.json"],
         "vision": ["output/pipeline/vision_analysis.json"],
         "semantic_graph": ["output/pipeline/semantic_blocks.json"],
+        "reference": ["output/pipeline/reference_brief.json"],
         "script": ["output/pipeline/storyboard.json"],
         "tts": ["output/pipeline/voiceover.mp3"],
         "render": ["output/deliverables/final_preview.mp4", "output/deliverables/narration_subtitle.srt"],
@@ -484,12 +494,39 @@ def run_pipeline_on_project(cfg, pm: ProjectManager, project_id: str, cloud: Clo
         has_checkpoint=False,
     )
 
+    # task_config chỉ nên hỏi người dùng 1 LẦN dù được dùng ở cả 2 stage
+    # ("reference" và "script") — nếu 1 trong 2 đã có checkpoint và bị skip,
+    # ask_task_config() sẽ không được gọi lần nào; nếu cả 2 đều chạy thật,
+    # cache dưới đây đảm bảo chỉ hỏi 1 lần.
+    _task_config_cache: dict[str, dict] = {}
+
+    def _get_task_config() -> dict:
+        if "value" not in _task_config_cache:
+            _task_config_cache["value"] = ask_task_config(cfg)
+        return _task_config_cache["value"]
+
+    def _run_reference():
+        task_config = _get_task_config()
+        return reference_video.run_reference_stage(cfg, task_config, checkpoint_mgr=ckpt)
+
+    reference_result = run_stage("reference", _run_reference)
+
     def _run_script():
-        task_config = ask_task_config(cfg)
+        task_config = _get_task_config()
         hook = choose_hook(cfg, task_config)
+
+        director_brief = task_config.get("plot_summary", "")
+        ref_brief = (reference_result or {}).get("combined_brief", "")
+        ref_note = (reference_result or {}).get("note", "")
+        if ref_brief:
+            # Gộp tóm tắt tự nhập (nếu có) + transcript tham khảo + cảnh báo
+            # chống đạo văn thành 1 director_brief duy nhất cho script_writer.
+            pieces = [p for p in [director_brief, ref_brief, ref_note] if p]
+            director_brief = "\n\n".join(pieces)
+
         return script_writer.run_script_writer(
             cfg, task_config, semantic_blocks, asr_timeline, vision_analysis,
-            hook=hook, director_brief=task_config.get("plot_summary", ""), checkpoint_mgr=ckpt,
+            hook=hook, director_brief=director_brief, checkpoint_mgr=ckpt,
         )
 
     storyboard = run_stage("script", _run_script)

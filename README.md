@@ -12,9 +12,20 @@ Output: A new video with AI-generated voiceover commentary, properly synced with
 2. **ASR** — Speech-to-text transcription using faster-whisper
 3. **Vision** — AI analyzes each scene's visual content
 4. **Semantic Graph** — Combines audio + visual analysis into structured blocks
-5. **Script** — AI writes viral-style narration commentary
-6. **TTS** — Text-to-speech voiceover generation
-7. **Render** — Final video assembly with synced commentary
+5. **Reference** — (optional) fetches transcripts from reference/competitor video links, so the script writer knows the plot accurately
+6. **Script** — AI writes viral-style narration commentary
+7. **TTS** — Text-to-speech voiceover generation
+8. **Render** — Final video assembly with synced commentary
+
+### Reference video links (optional)
+
+To help the AI get the plot right (character names, twists, event order) instead of guessing from the source clip alone, you can give it one or more reference/competitor video links (e.g. a full recap already on YouTube):
+
+- When running a project you'll be prompted: `Link video tham khảo (đối thủ, cách nhau bởi dấu phẩy, tuỳ chọn)`. Paste one or more comma-separated YouTube links, or leave blank.
+- Or pre-fill them in `config.toml` under `[reference] urls = [...]` so they're used automatically without prompting.
+- It tries `youtube-transcript-api` first (lightweight, less likely to be blocked), and falls back to `yt-dlp --write-auto-sub` only if that fails. Both are optional dependencies — if neither is installed or a video has no captions, that URL is just skipped and the pipeline keeps going.
+- If YouTube blocks `yt-dlp` with "Sign in to confirm you're not a bot", set `reference.ytdlp_cookies_from_browser = "chrome"` (or `"firefox"`, `"edge"`) in `config.toml` to use your real browser session's cookies.
+- The fetched text is only used to fact-check names/plot points for the narration — the prompt explicitly tells the model not to copy the reference's wording, to avoid plagiarizing another channel's script.
 
 ---
 
@@ -171,6 +182,16 @@ When you continue a project:
 | `narration_pov` | Narration point of view | `third_person` |
 | `content_type` | Content type | `movie` |
 | `target_duration_sec` | Target output duration | `180` |
+
+### `[reference]` — Reference/Competitor Video Links
+
+| Key | Description | Default |
+|-----|--------------|---------|
+| `urls` | Default reference video links (used if you leave the prompt blank) | `[]` |
+| `languages` | Preferred subtitle languages, tried in order | `["vi", "en"]` |
+| `max_chars_per_video` | Max characters kept per reference video (truncated beyond this) | `6000` |
+| `use_ytdlp_fallback` | Fall back to yt-dlp when youtube-transcript-api fails | `true` |
+| `ytdlp_cookies_from_browser` | Browser to pull cookies from for yt-dlp (`chrome`/`firefox`/`edge`), fixes bot-check errors | `""` |
 
 ### `[cloud]` — Cloud Storage
 

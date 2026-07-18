@@ -82,6 +82,27 @@ micro_checkpoint_interval = 1
 # auto_sync_cloud: tự động sync lên cloud (Tigris) sau mỗi checkpoint
 auto_sync_cloud = true
 
+[reference]
+# Link video tham khảo (đối thủ) để AI đối chiếu đúng tên nhân vật/cốt
+# truyện khi viết narration — KHÔNG dùng để sao chép văn phong (xem
+# reference_video.py). Có thể để trống và nhập trực tiếp lúc chạy pipeline
+# (menu sẽ hỏi, cách nhau bởi dấu phẩy nếu nhiều link).
+urls = []
+# Ngôn ngữ phụ đề ưu tiên khi lấy transcript (thử lần lượt theo thứ tự).
+languages = ["vi", "en"]
+# Giới hạn ký tự lấy từ MỖI video tham khảo (tránh tốn quá nhiều token khi
+# viết kịch bản — transcript dài sẽ bị cắt bớt và đánh dấu "[...]").
+max_chars_per_video = 6000
+# Tầng 1: youtube-transcript-api (ưu tiên, ít bị chặn). Tầng 2 (fallback):
+# yt-dlp --write-auto-sub, chỉ dùng khi tầng 1 thất bại hoặc URL không phải
+# YouTube. Tắt fallback nếu muốn tránh hoàn toàn rủi ro bị YouTube bot-check
+# chặn (khi đó video không có transcript sẽ bị bỏ qua thay vì thử yt-dlp).
+use_ytdlp_fallback = true
+# Tên trình duyệt để yt-dlp lấy cookie đăng nhập thật (vd "chrome", "firefox",
+# "edge") — giúp giảm lỗi "Sign in to confirm you're not a bot" khi fallback
+# sang yt-dlp. Để trống "" nếu không cần (yt-dlp chạy ẩn danh).
+ytdlp_cookies_from_browser = ""
+
 [paths]
 input_video = "./input/source.mp4"
 output_dir = "./output"

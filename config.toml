@@ -92,6 +92,15 @@ micro_checkpoint_interval = 1
 # auto_sync_cloud: auto sync to cloud storage (Tigris) after each checkpoint
 auto_sync_cloud = true
 
+[reference]
+# Link video tham khảo (đối thủ) để AI đối chiếu đúng tên nhân vật/cốt
+# truyện khi viết narration — KHÔNG dùng để sao chép văn phong.
+urls = []
+languages = ["vi", "en"]
+max_chars_per_video = 6000
+use_ytdlp_fallback = true
+ytdlp_cookies_from_browser = ""
+
 [paths]
 input_video = "./input/source.mp4"
 output_dir = "./output"

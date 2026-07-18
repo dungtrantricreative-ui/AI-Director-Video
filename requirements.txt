@@ -36,3 +36,10 @@ numpy>=1.26.0
 
 # --- Cloud storage (Tigris, or any other S3-compatible provider) ---
 boto3>=1.34.0
+
+# --- Reference video (competitor plot transcript, for director_brief) ---
+# youtube-transcript-api = tầng 1 (ưu tiên, ít bị YouTube bot-detection chặn).
+# yt-dlp = tầng 2, fallback khi video không có transcript qua tầng 1.
+# Cả hai đều "mềm": nếu thiếu, reference_video.py tự bỏ qua, không crash pipeline.
+youtube-transcript-api>=0.6.2
+yt-dlp>=2024.12.13
