@@ -49,20 +49,14 @@ jobs:
       - name: Cài thư viện Python
         run: pip install -r requirements.txt
 
-      - name: Tạo config.toml từ secrets
-        env:
-          CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
-          MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          CLOUD_ACCESS_KEY: ${{ secrets.CLOUD_ACCESS_KEY }}
-          CLOUD_SECRET_KEY: ${{ secrets.CLOUD_SECRET_KEY }}
-          CLOUD_BUCKET_NAME: ${{ secrets.CLOUD_BUCKET_NAME }}
-          CLOUD_ENDPOINT_URL: ${{ secrets.CLOUD_ENDPOINT_URL }}
-          CLOUD_REGION_NAME: ${{ secrets.CLOUD_REGION_NAME }}
-          CLOUD_ADDRESSING_STYLE: ${{ secrets.CLOUD_ADDRESSING_STYLE }}
+      - name: Kiểm tra config.toml đã có trong repo
         run: |
-          envsubst < config.ci.toml.template > config.toml
-          echo "Đã tạo config.toml (không in nội dung ra log vì chứa secret)."
+          if [ ! -f config.toml ]; then
+            echo "LỖI: không tìm thấy config.toml trong repo."
+            echo "Bạn cần commit file config.toml (đã điền key thật) lên repo."
+            exit 1
+          fi
+          echo "Đã tìm thấy config.toml."
 
       - name: Chạy pipeline (tự chọn project mới nhất chưa xong)
         run: python ci_run_latest_project.py
@@ -77,4 +71,3 @@ jobs:
             projects/**/output/pipeline/*.log
           if-no-files-found: ignore
           retention-days: 7
-          
