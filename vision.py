@@ -1,10 +1,11 @@
 """
 vision.py — phân tích thị giác cho từng scene.
 
-Hỗ trợ 3 backend, chọn qua config.toml [processing] vision_backend:
+Hỗ trợ 4 backend, chọn qua config.toml [processing] vision_backend:
   - "local"    : Qwen3-VL-4B-Instruct tải từ Hugging Face, chạy qua `transformers`
                  (cần GPU tốt, chậm với video nhiều scene vì generate() tuần tự
-                 từng scene một).
+                 từng scene một; trên CPU thuần như GitHub Actions runner thì
+                 KHÔNG khả thi với video nhiều scene — quá chậm).
   - "cerebras" : Gemma 4 31B multimodal qua Cerebras API (OpenAI-compatible),
                  dùng chung cerebras_api_key đã có trong [api]. Nhanh hơn nhiều
                  cho video dài vì chạy trên wafer-scale chip, không tốn thời
@@ -16,6 +17,16 @@ Hỗ trợ 3 backend, chọn qua config.toml [processing] vision_backend:
                  mistral_api_key riêng trong [api]. Không dùng chung engine với
                  script_writer.py (vẫn là Cerebras/GLM) — chỉ thay backend đọc
                  ảnh cho stage vision. Phù hợp cho máy không GPU/RAM thấp.
+  - "moondream": Moondream2 (~1.9B, dense), tải từ Hugging Face, chạy CPU-only
+                 qua `transformers` — được thiết kế riêng cho CPU/edge nên
+                 nhanh hơn nhiều lần so với "local" (Qwen3-VL-4B) trên cùng
+                 phần cứng không GPU (đúng trường hợp GitHub Actions runner).
+                 Đánh đổi: API gốc của Moondream2 chỉ nhận 1 ảnh/lần hỏi (không
+                 có multi-image chat template như Qwen), nên backend này CHỈ
+                 dùng 1 keyframe đại diện/scene thay vì gộp cả
+                 vision_frames_per_scene ảnh — đổi lấy tốc độ, chất lượng đọc
+                 cảnh (đặc biệt các trường suy luận như emotion/visual_intensity)
+                 sẽ kém tinh tế hơn Qwen3-VL-4B hoặc các backend API lớn.
 
 Output JSON giữ nguyên schema `vision_analysis.json` mô tả trong
 ref-asr-vision-pipeline.md để không phá vỡ các stage sau (semantic graph,
@@ -465,12 +476,123 @@ class MistralVisionAnalyzer:
         return parsed
 
 
+# =============================================================================
+# Backend "moondream" — Moondream2 (~1.9B), tối ưu cho CPU/edge
+# =============================================================================
+#
+# Khác 2 backend API ở trên (không tốn CPU vì compute nằm ở server), backend
+# này VẪN chạy local như "local" (Qwen3-VL-4B) — nhưng Moondream2 nhỏ hơn
+# ~2x và được huấn luyện/tối ưu riêng để chạy tốt trên CPU/Raspberry Pi, nên
+# nhanh hơn nhiều lần so với Qwen3-VL-4B trên cùng máy không GPU (đúng cảnh
+# GitHub Actions runner). Không dùng multi-image batch như LocalVisionAnalyzer
+# vì API gốc của Moondream2 (encode_image + answer_question) chỉ nhận 1 ảnh/
+# câu hỏi — nên implement analyze_scene() đơn lẻ (không có analyze_batch),
+# và chỉ đọc 1 keyframe đại diện/scene (frame ở giữa danh sách keyframes).
+class MoondreamVisionAnalyzer:
+    """Bọc model Moondream2, load một lần và tái sử dụng cho toàn bộ scene."""
+
+    def __init__(self, cfg):
+        self.cfg = cfg
+        self.model_name = cfg.get("processing.moondream_model_name", "vikhyatk/moondream2")
+        self.revision = cfg.get("processing.moondream_revision", "2025-06-21")
+        self.cache_dir = str(cfg.resolve_path("paths.model_cache_dir"))
+        self.device = resolve_torch_device(cfg.get("processing.vision_device", "auto"))
+        self.max_new_tokens = cfg.get("processing.vision_max_new_tokens", 512)
+        self.model = None
+        self.tokenizer = None
+        self._torch = None
+
+    def load(self) -> None:
+        import torch  # lazy import: chỉ cần khi thực sự dùng backend "moondream"
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+        self._torch = torch
+
+        print(f"[vision] Loading {self.model_name} (rev={self.revision or 'main'}) "
+              f"on {self.device} (backend=moondream, 1 keyframe/scene)... "
+              f"(lần đầu sẽ tải model; nhẹ hơn Qwen3-VL-4B nhiều nên tải nhanh hơn)")
+
+        kwargs: dict[str, Any] = {"trust_remote_code": True, "cache_dir": self.cache_dir}
+        if self.revision:
+            kwargs["revision"] = self.revision
+
+        self.model = AutoModelForCausalLM.from_pretrained(self.model_name, **kwargs)
+        self.tokenizer = AutoTokenizer.from_pretrained(self.model_name, **kwargs)
+        if self.device in ("cpu", "mps"):
+            self.model.to(self.device)
+        self.model.eval()
+
+    def unload(self) -> None:
+        del self.model
+        del self.tokenizer
+        self.model = None
+        self.tokenizer = None
+        gc.collect()
+        if self._torch is not None:
+            try:
+                self._torch.cuda.empty_cache()
+            except Exception:
+                pass
+
+    @staticmethod
+    def _pick_frame(frame_paths: list[str]) -> str | None:
+        """Chọn 1 frame đại diện cho scene: frame ở giữa danh sách (thường
+        tránh được transition/fade dính ở frame đầu/cuối scene) thay vì
+        luôn lấy frame đầu tiên."""
+        existing = [p for p in frame_paths if Path(p).exists()]
+        if not existing:
+            return None
+        return existing[len(existing) // 2]
+
+    def analyze_scene(self, scene_id: str, frame_paths: list[str]) -> dict[str, Any]:
+        frame_path = self._pick_frame(frame_paths)
+        if frame_path is None:
+            return _empty_result(scene_id, reason="no_frames")
+
+        try:
+            image = Image.open(frame_path).convert("RGB")
+        except Exception as e:
+            print(f"[vision] Lỗi mở ảnh {frame_path} cho {scene_id}: {e}")
+            return _empty_result(scene_id, reason="image_open_error")
+
+        # Moondream2 không có slot "system prompt" riêng như chat model
+        # thông thường -> gộp system prompt vào luôn câu hỏi.
+        prompt = (
+            VISION_SYSTEM_PROMPT
+            + " This is a single representative frame from the scene "
+              "(not all frames) — analyze it and return the JSON object "
+              "described above."
+        )
+
+        try:
+            enc_image = self.model.encode_image(image)
+            output_text = self.model.answer_question(
+                enc_image, prompt, self.tokenizer, max_new_tokens=self.max_new_tokens,
+            )
+        except TypeError:
+            # Vài revision cũ của moondream2 không nhận max_new_tokens qua
+            # answer_question() -> gọi lại không kèm tham số này.
+            try:
+                output_text = self.model.answer_question(enc_image, prompt, self.tokenizer)
+            except Exception as e:
+                print(f"[vision] Lỗi Moondream2 cho {scene_id}: {e}")
+                return _empty_result(scene_id, reason="model_error")
+        except Exception as e:
+            print(f"[vision] Lỗi Moondream2 cho {scene_id}: {e}")
+            return _empty_result(scene_id, reason="model_error")
+
+        parsed = _parse_json_response(output_text)
+        parsed["scene_id"] = scene_id
+        return parsed
+
+
 def _build_analyzer(cfg):
     backend = cfg.get("processing.vision_backend", "local")
     if backend == "cerebras":
         return CerebrasVisionAnalyzer(cfg)
     if backend == "mistral":
         return MistralVisionAnalyzer(cfg)
+    if backend == "moondream":
+        return MoondreamVisionAnalyzer(cfg)
     return LocalVisionAnalyzer(cfg)
 
 

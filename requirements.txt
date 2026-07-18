@@ -16,12 +16,15 @@ scenedetect[opencv]>=0.7
 opencv-python>=4.13.0
 ffmpeg-python>=0.2.0
 
-# --- Vision (Qwen3-VL-4B-Instruct) ---
+# --- Vision (Qwen3-VL-4B-Instruct, backend "local") ---
 transformers>=4.57.0
 accelerate>=1.2.0
 torch>=2.4.0
 qwen-vl-utils>=0.0.14
 pillow>=10.4.0
+
+# --- Vision (Moondream2, backend "moondream") ---
+einops>=0.7.0
 
 # --- LLM script writer (Cerebras / OpenAI-compatible client) ---
 openai>=1.50.0

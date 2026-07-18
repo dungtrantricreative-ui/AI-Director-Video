@@ -41,8 +41,10 @@ asr_compute_type = "auto"         # auto | float16 | int8
 asr_language = "vi"               # language code, leave empty "" for auto-detect
 
 # ---- Vision ----
-# "local" (needs GPU) | "cerebras" | "mistral" (recommended for no-GPU machines)
-vision_backend = "local"
+# "local" (needs GPU) | "cerebras" | "mistral" | "moondream" (CPU-only, nhanh
+# nhất trong các lựa chọn không-GPU — dùng cho máy/CI không có GPU như
+# GitHub Actions runner; xem so sánh chi tiết trong docstring đầu vision.py)
+vision_backend = "moondream"
 cerebras_vision_model = "gemma-4-31b"
 cerebras_vision_max_images = 2
 cerebras_vision_rpm = 5
@@ -51,6 +53,17 @@ cerebras_vision_rpm = 5
 mistral_vision_model = "mistral-large-latest"
 mistral_vision_max_images = 8
 mistral_vision_rpm = 15
+
+# ---- Vision backend "moondream" (Moondream2, ~1.9B, tối ưu CPU/edge) ----
+# Model nhỏ hơn Qwen3-VL-4B ~2x và được huấn luyện riêng để chạy nhanh trên
+# CPU, nên phù hợp cho GitHub Actions runner (không GPU). Đổi lại chỉ đọc
+# 1 keyframe đại diện/scene (không gộp cả vision_frames_per_scene ảnh như
+# backend "local"), nên chất lượng đọc cảnh (đặc biệt emotion/visual_intensity)
+# kém tinh tế hơn Qwen3-VL-4B hoặc backend API (cerebras/mistral).
+# revision: để trống "" nếu muốn luôn dùng bản mới nhất trên Hugging Face
+# (rủi ro: HF có thể đổi API khiến code lỗi); pin ngày cụ thể nếu cần ổn định.
+moondream_model_name = "vikhyatk/moondream2"
+moondream_revision = "2025-06-21"
 
 vision_model_name = "Qwen/Qwen3-VL-4B-Instruct"
 vision_device = "auto"
