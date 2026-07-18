@@ -241,6 +241,64 @@ show_project_menu_on_start = false
 
 ---
 
+## Chạy tự động bằng GitHub Actions (thay cho Colab)
+
+Repo có sẵn workflow `.github/workflows/run-pipeline.yml` để chạy pipeline
+trên máy ảo của GitHub thay vì phải mở Colab. Máy ảo này **không có GPU**,
+nên workflow đã cấu hình sẵn `vision_backend = "mistral"` (gọi API thay vì
+chạy model Qwen3-VL local) — nếu đổi lại `"local"` pipeline sẽ rất chậm hoặc
+treo vì chạy vision model bằng CPU.
+
+**Cách hoạt động:** vì máy ảo bị xoá sạch sau mỗi lần chạy, project phải
+được lưu trên cloud (Tigris/S3) để "sống sót" qua các lần chạy. Mỗi lần
+workflow chạy, nó tự động:
+1. Liệt kê tất cả project trên cloud.
+2. Bỏ qua project đã hoàn thành (`status = completed`).
+3. Chọn project **mới nhất chưa xong**, tải về, và chạy tiếp từ checkpoint
+   gần nhất (script: `ci_run_latest_project.py`).
+4. Tự sync kết quả lên lại cloud.
+
+Nếu không có project nào đang dang dở, workflow tự thoát êm — không báo lỗi.
+
+### Thiết lập (làm 1 lần)
+
+1. Vào repo trên GitHub → **Settings → Secrets and variables → Actions →
+   New repository secret**, thêm lần lượt các secret sau:
+
+   | Tên secret | Giá trị |
+   |---|---|
+   | `CEREBRAS_API_KEY` | API key Cerebras (bắt buộc — dùng viết kịch bản) |
+   | `MISTRAL_API_KEY` | API key Mistral (bắt buộc — dùng đọc hình ảnh, vì không có GPU) |
+   | `HF_TOKEN` | Token Hugging Face (để trống nếu không dùng model cần auth) |
+   | `CLOUD_ACCESS_KEY` | Access key của Tigris/S3 |
+   | `CLOUD_SECRET_KEY` | Secret key của Tigris/S3 |
+   | `CLOUD_BUCKET_NAME` | Tên bucket, vd `ai-director-video` |
+   | `CLOUD_ENDPOINT_URL` | vd `https://t3.storage.dev` (Tigris) |
+   | `CLOUD_REGION_NAME` | vd `auto` (Tigris) |
+   | `CLOUD_ADDRESSING_STYLE` | vd `virtual` (Tigris) |
+
+2. Tạo project và upload video như bình thường (`python run.py` ở máy cá
+   nhân, hoặc Colab), rồi chọn **"5. Sync project to cloud"** để đẩy project
+   lên cloud — đây là project mà workflow sẽ tìm thấy và chạy tiếp.
+
+3. Push code lên nhánh `main` (workflow sẽ tự chạy), hoặc vào tab
+   **Actions → Run AI Director Video Pipeline → Run workflow** để bấm chạy
+   tay, hoặc chờ đến 8:00 sáng hôm sau (lịch chạy tự động mỗi ngày).
+
+### Lưu ý quan trọng
+
+- **Giới hạn 6 giờ/job**: GitHub Actions tự ngắt job sau 6 giờ dù chưa xong
+  (giới hạn cứng của GitHub, không thể tăng). Nhờ checkpoint gần như
+  real-time, lần chạy sau sẽ tự tiếp tục đúng chỗ dừng, không mất tiến độ.
+- **Không có GPU**: mọi bước cần GPU (vision local, ASR nếu chọn model lớn)
+  sẽ chạy bằng CPU, chậm hơn Colab có GPU khá nhiều — phù hợp cho video
+  ngắn/vừa. Nếu cần nhanh hơn, cân nhắc self-hosted runner có GPU riêng.
+- **Chỉ chạy 1 project/lần**: nếu có nhiều project dang dở, mỗi lần chạy chỉ
+  xử lý 1 project (mới nhất); các project còn lại sẽ được xử lý ở lần chạy
+  kế tiếp.
+
+---
+
 ## File Structure
 
 ```

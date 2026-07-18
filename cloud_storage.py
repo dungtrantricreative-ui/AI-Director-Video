@@ -531,25 +531,52 @@ class CloudStorage:
         return len(failed) == 0 or (downloaded - len(failed)) > 0
 
     def list_remote_projects(self) -> list[dict[str, Any]]:
-        """Liệt kê tất cả project đang lưu trên cloud."""
+        """Liệt kê tất cả project đang lưu trên cloud.
+
+        Kèm theo "last_modified" (thời điểm object mới nhất được ghi, lấy
+        từ LastModified do S3 trả về) và "status" suy luận (completed/
+        in_progress/new) dựa trên các key thấy được — CẦN THIẾT cho môi
+        trường chạy không có ổ đĩa cũ (vd GitHub Actions), nơi không thể
+        dựa vào mtime file cục bộ như ProjectManager._refresh_project_meta
+        vẫn làm cho project chạy trên máy có ổ đĩa bền vững.
+        """
         if not self.bucket_ready:
             return []
-        projects = {}
+        projects: dict[str, dict[str, Any]] = {}
         try:
-            files = self._list_files("projects/")
-            for key in files:
-                parts = key.split("/")
-                if len(parts) >= 2:
+            paginator = self.client.get_paginator("list_objects_v2")
+            for page in paginator.paginate(Bucket=self.bucket_name, Prefix="projects/"):
+                for obj in page.get("Contents", []):
+                    key = obj["Key"]
+                    last_modified = obj.get("LastModified")
+                    parts = key.split("/")
+                    if len(parts) < 2:
+                        continue
                     project_id = parts[1]
-                    if project_id not in projects:
-                        projects[project_id] = {
-                            "project_id": project_id,
-                            "file_count": 0,
-                        }
-                    projects[project_id]["file_count"] += 1
+                    p = projects.setdefault(project_id, {
+                        "project_id": project_id,
+                        "file_count": 0,
+                        "status": "new",
+                        "_last_modified_dt": None,
+                    })
+                    p["file_count"] += 1
+                    if last_modified is not None:
+                        if p["_last_modified_dt"] is None or last_modified > p["_last_modified_dt"]:
+                            p["_last_modified_dt"] = last_modified
+                    if key.endswith("output/deliverables/final_preview.mp4"):
+                        p["status"] = "completed"
+                    elif "/checkpoints/" in key and p["status"] != "completed":
+                        p["status"] = "in_progress"
         except Exception as e:
             print(f"[cloud] Lỗi khi liệt kê project: {e}")
-        return list(projects.values())
+            return []
+
+        result = []
+        for p in projects.values():
+            dt = p.pop("_last_modified_dt")
+            p["last_modified"] = dt.strftime("%Y-%m-%d %H:%M:%S") if dt else ""
+            result.append(p)
+        return result
 
     def delete_project(self, project_id: str) -> bool:
         """Xoá toàn bộ 1 project trên cloud."""
